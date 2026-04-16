@@ -219,6 +219,7 @@ MIS_VIEWER_ROLE = "MIS Viewer"
 # tuple to ship a new default — existing rows on a site are never touched.
 DEFAULT_MARKET_SEGMENTS = (
 	"GT Distribution",
+	"Modern Trade",
 	"QuickCommerce",
 	"Ecommerce",
 	"Wholesale",
