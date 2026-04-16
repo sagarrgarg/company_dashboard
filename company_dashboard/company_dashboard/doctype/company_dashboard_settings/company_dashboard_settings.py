@@ -183,21 +183,24 @@ _SEED_MAP: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
 )
 
 _MULTISELECT_FIELDS = tuple(f[0] for f in _SEED_MAP)
+_CUSTOMER_GROUP_FIELDS = ("customer_segment_groups",)
 
 
 class CompanyDashboardSettings(Document):
 	def validate(self):
 		for fieldname in _MULTISELECT_FIELDS:
-			self._dedupe(fieldname)
+			self._dedupe(fieldname, key="account")
+		for fieldname in _CUSTOMER_GROUP_FIELDS:
+			self._dedupe(fieldname, key="customer_group")
 
-	def _dedupe(self, fieldname: str) -> None:
+	def _dedupe(self, fieldname: str, key: str = "account") -> None:
 		rows = self.get(fieldname) or []
 		seen: set[str] = set()
 		keep: list = []
 		for r in rows:
-			acc = r.get("account")
-			if acc and acc not in seen:
-				seen.add(acc)
+			val = r.get(key)
+			if val and val not in seen:
+				seen.add(val)
 				keep.append(r)
 		self.set(fieldname, keep)
 
@@ -210,6 +213,38 @@ def get_configured_accounts(fieldname: str) -> list[str]:
 		return []
 	rows = doc.get(fieldname) or []
 	return [r.account for r in rows if getattr(r, "account", None)]
+
+
+def get_allowed_customer_groups() -> list[str]:
+	"""Expanded list of Customer Group names admins want surfaced on /mis/segments.
+
+	Each row in ``customer_segment_groups`` brings its full sub-tree (descendants) via
+	a single nested-set walk — so picking a parent like "Channel" auto-includes every
+	child channel group, present and future. Returns ``[]`` when the multiselect is
+	empty; callers treat that as "show all groups with sales".
+	"""
+	try:
+		doc = frappe.get_cached_doc("Company Dashboard Settings", "Company Dashboard Settings")
+	except frappe.DoesNotExistError:
+		return []
+	rows = doc.get("customer_segment_groups") or []
+	roots = [r.customer_group for r in rows if getattr(r, "customer_group", None)]
+	if not roots:
+		return []
+
+	# Single SQL using the NSM lft/rgt range — handles arbitrarily deep trees in one
+	# round trip and includes the root rows themselves.
+	descendants = frappe.db.sql(
+		"""
+		select cg.name
+		from `tabCustomer Group` cg
+		join `tabCustomer Group` parent on parent.name in %(roots)s
+		where cg.lft >= parent.lft and cg.rgt <= parent.rgt
+		""",
+		{"roots": tuple(roots)},
+		pluck=True,
+	)
+	return sorted(set(descendants))
 
 
 MIS_VIEWER_ROLE = "MIS Viewer"

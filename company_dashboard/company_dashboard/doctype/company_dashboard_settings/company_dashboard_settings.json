@@ -7,6 +7,8 @@
  "field_order": [
   "intro_section",
   "intro_html",
+  "segments_section",
+  "customer_segment_groups",
   "cm2_section",
   "outbound_freight_accounts",
   "packaging_overhead_accounts",
@@ -38,6 +40,18 @@
    "fieldname": "intro_html",
    "fieldtype": "HTML",
    "options": "<div style='padding:12px 14px;background:#f7f5f0;border-left:3px solid #1f5f33;border-radius:4px;font-size:13px;line-height:1.6;color:#574f3e'><b>P&amp;L framework — MIS Overview waterfall:</b><br><b>CM1 = Gross Margin</b> = (Revenue − COGS) / Revenue — no config, derived from Sales Invoice × incoming_rate.<br><b>CM2 = CM1 − Variable fulfillment</b> (freight, packaging, transaction fees, schemes).<br><b>CM3 = CM2 − Marketing</b> (online + offline).<br><b>EBITDA = CM3 − Fixed operating overhead</b> (salary, rent, utilities, admin).<br><b>EBIT = EBITDA − Depreciation & Amortization.</b><br><b>PAT = EBIT − Interest & Finance − Income Tax Expense.</b><br>Each account multiselect below maps 1:1 to a line in that waterfall.</div>"
+  },
+  {
+   "fieldname": "segments_section",
+   "fieldtype": "Section Break",
+   "label": "Customer Segment scope"
+  },
+  {
+   "description": "Pick the Customer Groups to surface on the /mis/segments page. Children of any selected group are included automatically (e.g. selecting a parent \"Channel\" group brings in all its sub-channels). Leave empty to show every group with sales in the period — recommended when getting started.",
+   "fieldname": "customer_segment_groups",
+   "fieldtype": "Table MultiSelect",
+   "label": "Customer Groups to show",
+   "options": "Company Dashboard Customer Group Link"
   },
   {
    "fieldname": "cm2_section",

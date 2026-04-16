@@ -24,6 +24,7 @@ from frappe import _
 from frappe.utils import add_months, flt, getdate, today
 
 from company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings import (
+	get_allowed_customer_groups,
 	get_configured_accounts,
 )
 
@@ -834,6 +835,16 @@ def get_customer_segments(
 	elif intent == "b2b":
 		intent_clause = "and i.custom_sales_intent like 'B2B%%'"
 
+	# Customer Group scope from Company Dashboard Settings. Empty list → no filter
+	# (current behaviour: every group with sales). Non-empty → strict allow-list of
+	# the configured groups + every descendant via NSM.
+	allowed_groups = get_allowed_customer_groups()
+	scope_params: dict[str, object] = {}
+	scope_clause = ""
+	if allowed_groups:
+		scope_clause = "and c.customer_group in %(allowed_groups)s"
+		scope_params["allowed_groups"] = tuple(allowed_groups)
+
 	# Per-group rollup over the current and prior period.
 	def _rollup(p_from: date, p_to: date) -> dict[str, dict]:
 		rows = frappe.db.sql(
@@ -851,9 +862,10 @@ def get_customer_segments(
 			left join `tabDelivery Note Item` dni on dni.name = sii.dn_detail
 			where {SII_BASE_WHERE}
 			  {intent_clause}
+			  {scope_clause}
 			group by segment
 			""",
-			{"from": p_from, "to": p_to},
+			{"from": p_from, "to": p_to, **scope_params},
 			as_dict=True,
 		)
 		return {r["segment"]: r for r in rows}
@@ -872,9 +884,10 @@ def get_customer_segments(
 		from {SII_BASE_FROM}
 		where {SII_BASE_WHERE}
 		  {intent_clause}
+		  {scope_clause}
 		group by segment, yr, mo
 		""",
-		{"from": period.from_date, "to": period.to_date},
+		{"from": period.from_date, "to": period.to_date, **scope_params},
 		as_dict=True,
 	)
 	month_keys: list[str] = []
@@ -903,10 +916,11 @@ def get_customer_segments(
 		from {SII_BASE_FROM}
 		where {SII_BASE_WHERE}
 		  {intent_clause}
+		  {scope_clause}
 		group by segment, si.customer, customer_name
 		order by revenue desc
 		""",
-		{"from": period.from_date, "to": period.to_date},
+		{"from": period.from_date, "to": period.to_date, **scope_params},
 		as_dict=True,
 	)
 	top_customers_per_segment: dict[str, list[dict]] = {}
@@ -934,10 +948,11 @@ def get_customer_segments(
 		from {SII_BASE_FROM}
 		where {SII_BASE_WHERE}
 		  {intent_clause}
+		  {scope_clause}
 		group by segment, category
 		order by revenue desc
 		""",
-		{"from": period.from_date, "to": period.to_date},
+		{"from": period.from_date, "to": period.to_date, **scope_params},
 		as_dict=True,
 	)
 	top_cat_per_segment: dict[str, list[dict]] = {}
