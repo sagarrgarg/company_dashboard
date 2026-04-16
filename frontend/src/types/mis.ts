@@ -155,6 +155,11 @@ export interface CustomerSegmentsResponse {
 	company: string;
 	tax_mode: TaxMode;
 	intent: IntentFilter;
+	/** ``"group"`` when no Customer-Group scope is set (default — rows = Customer Groups).
+	 *  ``"customer"`` when settings has a scope — rows are individual Customers inside
+	 *  the scoped groups + their sub-groups, each with consolidated metrics. */
+	pivot: "group" | "customer";
+	scope_groups: string[];
 	month_keys: string[];
 	segments: CustomerSegment[];
 	totals: {

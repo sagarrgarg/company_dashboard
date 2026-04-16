@@ -51,6 +51,11 @@ export function CustomerSegmentsPage({
 	const active = activeTab === ALL_TAB ? null : segments.find((s) => s.segment === activeTab);
 	const taxLabel = taxMode === "incl" ? "Tax-inclusive" : "Tax-exclusive";
 	const intentLabel = intent === "all" ? "All items" : intent === "b2c" ? "B2C items only" : "B2B items only";
+	const pivot = res?.pivot ?? "group";
+	const rowNoun = pivot === "customer" ? "customer" : "segment";
+	const scopeSuffix = pivot === "customer" && res?.scope_groups?.length
+		? ` · scoped to ${res.scope_groups.slice(0, 3).join(", ")}${res.scope_groups.length > 3 ? `, +${res.scope_groups.length - 3}` : ""}`
+		: "";
 
 	return (
 		<>
@@ -64,7 +69,7 @@ export function CustomerSegmentsPage({
 					</h1>
 					<div className="text-[12px] text-text-2 mt-1.5 font-medium">
 						{res
-							? `${res.period.label} · ${taxLabel} · ${intentLabel} · ${res.totals.segment_count} segments`
+							? `${res.period.label} · ${taxLabel} · ${intentLabel} · ${res.totals.segment_count} ${rowNoun}${res.totals.segment_count === 1 ? "" : "s"}${scopeSuffix}`
 							: "loading…"}
 					</div>
 				</div>
@@ -90,17 +95,23 @@ export function CustomerSegmentsPage({
 						totalRevenue={res.totals.revenue}
 						active={activeTab}
 						onChange={setActiveTab}
+						pivot={pivot}
 					/>
 
 					{activeTab === ALL_TAB ? (
-						<AllSegmentsView res={res} onSelect={setActiveTab} />
+						<AllSegmentsView res={res} onSelect={setActiveTab} pivot={pivot} />
 					) : active ? (
-						<SegmentDetail segment={active} totalRevenue={res.totals.revenue} monthKeys={res.month_keys} />
+						<SegmentDetail
+							segment={active}
+							totalRevenue={res.totals.revenue}
+							monthKeys={res.month_keys}
+							pivot={pivot}
+						/>
 					) : (
 						<div className="card">
-							<div className="card-title">Segment not found</div>
+							<div className="card-title">{pivot === "customer" ? "Customer" : "Segment"} not found</div>
 							<p className="text-[12px] text-text-2">
-								The selected segment isn't in the current period — pick another tab.
+								The selected {rowNoun} isn't in the current period — pick another tab.
 							</p>
 						</div>
 					)}
@@ -115,12 +126,15 @@ function SegmentTabBar({
 	totalRevenue,
 	active,
 	onChange,
+	pivot,
 }: {
 	segments: CustomerSegment[];
 	totalRevenue: number;
 	active: string;
 	onChange: (next: string) => void;
+	pivot: "group" | "customer";
 }) {
+	const allLabel = pivot === "customer" ? "All customers" : "All segments";
 	return (
 		<div className="flex flex-wrap items-center gap-1.5 mb-5 pb-3 border-b border-border">
 			<TabButton
@@ -128,7 +142,7 @@ function SegmentTabBar({
 				onClick={() => onChange(ALL_TAB)}
 				label={
 					<>
-						All segments <span className="text-[9.5px] font-medium opacity-80 ml-0.5">{segments.length}</span>
+						{allLabel} <span className="text-[9.5px] font-medium opacity-80 ml-0.5">{segments.length}</span>
 					</>
 				}
 			/>
@@ -182,11 +196,14 @@ function TabButton({
 function AllSegmentsView({
 	res,
 	onSelect,
+	pivot,
 }: {
 	res: { segments: CustomerSegment[]; totals: { revenue: number; customers: number; invoices: number; aov: number; gm_pct: number; gp: number } };
 	onSelect: (segment: string) => void;
+	pivot: "group" | "customer";
 }) {
 	const { segments, totals } = res;
+	const firstColLabel = pivot === "customer" ? "Customer" : "Segment";
 	return (
 		<>
 			<div className="grid grid-cols-5 gap-2.5 mb-4">
@@ -202,8 +219,8 @@ function AllSegmentsView({
 					<table className="w-full text-[12px] tabular-nums">
 						<thead>
 							<tr>
-								<Th align="left">Segment</Th>
-								<Th>Customers</Th>
+								<Th align="left">{firstColLabel}</Th>
+								{pivot === "group" && <Th>Customers</Th>}
 								<Th>Invoices</Th>
 								<Th>Revenue</Th>
 								<Th>% Mix</Th>
@@ -230,9 +247,11 @@ function AllSegmentsView({
 												{s.segment}
 											</span>
 										</td>
-										<td className="px-3 py-2 text-right text-text-2">
-											{s.customers.toLocaleString("en-IN")}
-										</td>
+										{pivot === "group" && (
+											<td className="px-3 py-2 text-right text-text-2">
+												{s.customers.toLocaleString("en-IN")}
+											</td>
+										)}
 										<td className="px-3 py-2 text-right text-text-2">
 											{s.invoices.toLocaleString("en-IN")}
 										</td>
@@ -254,7 +273,9 @@ function AllSegmentsView({
 							})}
 							<tr className="bg-surface-2 font-semibold border-t-2 border-border-md">
 								<td className="px-3 py-2.5 text-left text-text">Total</td>
-								<td className="px-3 py-2.5 text-right">{totals.customers.toLocaleString("en-IN")}</td>
+								{pivot === "group" && (
+									<td className="px-3 py-2.5 text-right">{totals.customers.toLocaleString("en-IN")}</td>
+								)}
 								<td className="px-3 py-2.5 text-right">{totals.invoices.toLocaleString("en-IN")}</td>
 								<td className="px-3 py-2.5 text-right text-text">{formatINRShort(totals.revenue)}</td>
 								<td className="px-3 py-2.5 text-right">100%</td>
@@ -269,7 +290,7 @@ function AllSegmentsView({
 				</div>
 			</div>
 
-			{segments.some((s) => s.segment === "(unassigned)") && (
+			{pivot === "group" && segments.some((s) => s.segment === "(unassigned)") && (
 				<div className="mt-4 px-4 py-3 rounded-lg bg-amber-bg border border-amber/20 text-amber text-[12px] leading-relaxed flex items-start gap-2.5">
 					<span className="mt-0.5 shrink-0 w-4 h-4 rounded-full bg-amber text-white text-[10px] font-bold flex items-center justify-center">
 						!
@@ -290,10 +311,12 @@ function SegmentDetail({
 	segment,
 	totalRevenue,
 	monthKeys,
+	pivot,
 }: {
 	segment: CustomerSegment;
 	totalRevenue: number;
 	monthKeys: string[];
+	pivot: "group" | "customer";
 }) {
 	const share = totalRevenue ? (segment.revenue / totalRevenue) * 100 : 0;
 	const trendData = useMemo(
@@ -310,30 +333,50 @@ function SegmentDetail({
 		return (top3 / segment.revenue) * 100;
 	}, [segment]);
 
+	const isCustomer = pivot === "customer";
+
 	return (
 		<>
 			<div className="grid grid-cols-5 gap-2.5 mb-4">
 				<KpiTile
 					label="Revenue"
 					value={formatINRShort(segment.revenue)}
-					meta={`${formatPct(share)} of total`}
+					meta={`${formatPct(share)} of ${isCustomer ? "scope" : "total"}`}
 				/>
-				<KpiTile
-					label="Customers"
-					value={segment.customers.toLocaleString("en-IN")}
-					accent="blue"
-					meta={`${segment.invoices.toLocaleString("en-IN")} invoices`}
-				/>
+				{isCustomer ? (
+					<KpiTile
+						label="Invoices"
+						value={segment.invoices.toLocaleString("en-IN")}
+						accent="blue"
+						meta="in period"
+					/>
+				) : (
+					<KpiTile
+						label="Customers"
+						value={segment.customers.toLocaleString("en-IN")}
+						accent="blue"
+						meta={`${segment.invoices.toLocaleString("en-IN")} invoices`}
+					/>
+				)}
 				<KpiTile
 					label="AOV"
 					value={formatINRShort(segment.aov)}
 					meta="per invoice"
 				/>
-				<KpiTile
-					label="Avg Customer Value"
-					value={formatINRShort(segment.avg_customer_value)}
-					meta="rev / customer"
-				/>
+				{isCustomer ? (
+					<KpiTile
+						label="Gross Profit"
+						value={formatINRShort(segment.gp)}
+						accent={segment.gp > 0 ? "green" : "red"}
+						meta="tax-excl, valuated lines"
+					/>
+				) : (
+					<KpiTile
+						label="Avg Customer Value"
+						value={formatINRShort(segment.avg_customer_value)}
+						meta="rev / customer"
+					/>
+				)}
 				<KpiTile
 					label="GM %"
 					value={formatPct(segment.gm_pct)}
@@ -342,7 +385,7 @@ function SegmentDetail({
 				/>
 			</div>
 
-			<div className="grid grid-cols-[1.6fr_1fr] gap-4 mb-4">
+			<div className={cn("grid gap-4 mb-4", isCustomer ? "grid-cols-1" : "grid-cols-[1.6fr_1fr]")}>
 				<div className="card">
 					<div className="flex items-center justify-between mb-3">
 						<div>
@@ -400,6 +443,7 @@ function SegmentDetail({
 					</ResponsiveContainer>
 				</div>
 
+				{!isCustomer && (
 				<div className="card">
 					<div className="card-title">Top customers</div>
 					<div className="text-[10.5px] text-text-3 mb-2">
@@ -441,6 +485,7 @@ function SegmentDetail({
 						</tbody>
 					</table>
 				</div>
+				)}
 			</div>
 
 			<div className="card">
