@@ -15,14 +15,17 @@ an export audits cleanly standalone without opening the dashboard.
 
 from __future__ import annotations
 
+import base64
 import html as _html
 import io
+import os
 from datetime import datetime, timezone
 
 import frappe
 from frappe import _
 from frappe.utils.pdf import get_pdf
 from openpyxl import Workbook
+from PIL import Image, ImageDraw, ImageFont
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -491,7 +494,10 @@ def _build_pdf_html(overview: dict, assortment: dict, segments: dict, intent: st
 			_kpi_cell("Active SKUs", f"{int(kpi['active_skus']):,}", "items with sales", accent="blue"),
 			"</tr>",
 			"</table>",
+			"<div class='sub-header'>Monthly revenue — B2C vs B2B</div>",
+			_svg_monthly_chart(overview["monthly"]),
 			"<div class='sub-header'>CM ladder — % of revenue</div>",
+			_svg_cm_ladder(kpi),
 			_ladder_table(kpi),
 			"</section>",
 		]
@@ -515,6 +521,7 @@ def _build_pdf_html(overview: dict, assortment: dict, segments: dict, intent: st
 			_monthly_table(overview["monthly"]),
 			"<div class='spacer-16'></div>",
 			_section_header("Revenue by Category", "top 10 · Item Group"),
+			_svg_category_bars(overview["categories"]),
 			_category_table(overview["categories"]),
 			"</section>",
 		]
@@ -539,6 +546,7 @@ def _build_pdf_html(overview: dict, assortment: dict, segments: dict, intent: st
 				"Customer Segments",
 				f"{segments['totals']['segment_count']} segments · {intent_label}",
 			),
+			_svg_segment_bars(segments),
 			_segment_summary_table(segments),
 			_segment_top_customers(segments),
 			"</section>",
@@ -887,8 +895,9 @@ section { page-break-inside: avoid; }
 	letter-spacing: -0.02em;
 }
 .cover-meta {
-	position: absolute;
-	bottom: 6mm;
+	/* Keep this in the cover's flow — ``position: absolute`` escaped wkhtmltopdf's
+	 * page boundaries and repeated the timestamp on every subsequent page. */
+	margin-top: 38mm;
 	font-size: 9px;
 	color: #9e9382;
 }
@@ -1012,6 +1021,15 @@ table.pnl tr.deduction td { color: #574f3e; }
 	font-style: italic;
 }
 
+/* Server-side SVG charts. Inline width 100% so wkhtmltopdf scales them to the
+ * printable width while keeping the viewBox aspect ratio. Small top margin
+ * separates chart from the section sub-header. */
+svg.chart {
+	display: block;
+	margin: 2mm 0 4mm 0;
+	max-width: 100%;
+}
+
 /* Mini cards for segments */
 .mini-grid {
 	display: block;
@@ -1044,3 +1062,318 @@ table.pnl tr.deduction td { color: #574f3e; }
 table.mini-tbl td { border-bottom: none; padding: 2px 4px; font-size: 9px; }
 </style>
 """
+
+
+# ── Server-side PNG charts (Pillow) ───────────────────────────────────────────
+# wkhtmltopdf 0.12 silently drops inline SVG, so we rasterize to PNG server-side
+# and embed as data URLs. Colours mirror the dashboard so the PDF stays visually
+# consistent with the on-screen Recharts. Pillow ships with Frappe — no new dep.
+
+_CH_GREEN = (31, 95, 51)
+_CH_GREEN_LT = (31, 95, 51, 58)  # 22% alpha
+_CH_AMBER = (150, 86, 15)
+_CH_RED = (122, 31, 31)
+_CH_BLUE = (44, 78, 128)
+_CH_MUTED = (122, 111, 93)
+_CH_GRID = (40, 30, 15, 20)
+_CH_TEXT = (26, 24, 16)
+_CH_WHITE = (255, 255, 255)
+_CH_SURFACE = (250, 247, 240)
+
+# 2× render resolution → downscale in the PDF via CSS width. Keeps charts crisp
+# in print without blowing up file size.
+_SCALE = 2
+
+
+def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+	paths = [
+		"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+		if bold
+		else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+		"/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"
+		if bold
+		else "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+	]
+	for p in paths:
+		if os.path.exists(p):
+			return ImageFont.truetype(p, size * _SCALE)
+	return ImageFont.load_default()
+
+
+def _png_data_url(img: Image.Image) -> str:
+	buf = io.BytesIO()
+	img.save(buf, format="PNG", optimize=True)
+	return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _img_tag(img: Image.Image, width_px: int) -> str:
+	"""Render at 2× internally, display at 1× in the PDF so print output stays sharp."""
+	return f'<img class="chart" src="{_png_data_url(img)}" style="width:{width_px}px;max-width:100%;">'
+
+
+def _text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> float:
+	if hasattr(draw, "textbbox"):
+		bbox = draw.textbbox((0, 0), text, font=font)
+		return bbox[2] - bbox[0]
+	return draw.textlength(text, font=font)
+
+
+
+
+def _svg_monthly_chart(rows: list[dict], width: int = 720, height: int = 200) -> str:
+	"""Monthly B2C area + B2B line + Total line, rendered to PNG for wkhtmltopdf."""
+	if not rows:
+		return "<div class='empty'>No monthly data.</div>"
+
+	W, H = width * _SCALE, height * _SCALE
+	img = Image.new("RGB", (W, H), _CH_WHITE)
+	draw = ImageDraw.Draw(img, "RGBA")
+	f_axis = _load_font(9)
+	f_legend = _load_font(9)
+
+	pad_l, pad_r, pad_t, pad_b = 44 * _SCALE, 12 * _SCALE, 8 * _SCALE, 32 * _SCALE
+	chart_w = W - pad_l - pad_r
+	chart_h = H - pad_t - pad_b
+	n = len(rows)
+	step = chart_w / max(n - 1, 1)
+	max_val = max((r.get("total") or 0) for r in rows) or 1
+
+	def xy(i: int, v: float) -> tuple[float, float]:
+		x = pad_l + i * step
+		y = pad_t + chart_h - (v / max_val) * chart_h
+		return x, y
+
+	# Grid + Y labels at 0 / 33% / 66% / 100%
+	for frac, label in [(0, "0"), (0.33, f"{max_val * 0.33:.0f}"), (0.66, f"{max_val * 0.66:.0f}"), (1, f"{max_val:.0f}L")]:
+		y = pad_t + chart_h - frac * chart_h
+		draw.line([(pad_l, y), (pad_l + chart_w, y)], fill=_CH_GRID, width=1)
+		draw.text((pad_l - 6 * _SCALE, y - 5 * _SCALE), label, font=f_axis, fill=_CH_MUTED, anchor="rm")
+
+	# B2C area (fill + outline)
+	b2c_pts = [xy(i, r.get("b2c") or 0) for i, r in enumerate(rows)]
+	area_pts = b2c_pts + [(pad_l + chart_w, pad_t + chart_h), (pad_l, pad_t + chart_h)]
+	draw.polygon(area_pts, fill=_CH_GREEN_LT)
+	if len(b2c_pts) > 1:
+		draw.line(b2c_pts, fill=_CH_GREEN, width=2 * _SCALE, joint="curve")
+
+	# B2B line
+	b2b_pts = [xy(i, r.get("b2b") or 0) for i, r in enumerate(rows)]
+	if len(b2b_pts) > 1:
+		draw.line(b2b_pts, fill=_CH_AMBER, width=2 * _SCALE, joint="curve")
+
+	# Total dashed
+	total_pts = [xy(i, r.get("total") or 0) for i, r in enumerate(rows)]
+	for a, b in zip(total_pts, total_pts[1:]):
+		# manual dashed — Pillow has no native dash pattern
+		dx, dy = b[0] - a[0], b[1] - a[1]
+		length = (dx * dx + dy * dy) ** 0.5 or 1
+		ux, uy = dx / length, dy / length
+		dash = 6 * _SCALE
+		gap = 4 * _SCALE
+		d = 0.0
+		while d < length:
+			x1 = a[0] + ux * d
+			y1 = a[1] + uy * d
+			x2 = a[0] + ux * min(d + dash, length)
+			y2 = a[1] + uy * min(d + dash, length)
+			draw.line([(x1, y1), (x2, y2)], fill=_CH_TEXT, width=1 * _SCALE)
+			d += dash + gap
+
+	# X-axis month labels
+	tick = 1 if n <= 8 else 2
+	for i, r in enumerate(rows):
+		if i % tick != 0 and i != n - 1:
+			continue
+		x = pad_l + i * step
+		draw.text((x, pad_t + chart_h + 6 * _SCALE), str(r.get("month", "")), font=f_axis, fill=_CH_MUTED, anchor="mt")
+
+	# Legend
+	lx = pad_l
+	ly = H - 12 * _SCALE
+	draw.rectangle([lx, ly, lx + 10 * _SCALE, ly + 3 * _SCALE], fill=_CH_GREEN)
+	draw.text((lx + 14 * _SCALE, ly), "B2C", font=f_legend, fill=_CH_MUTED, anchor="lm")
+	lx += 46 * _SCALE
+	draw.rectangle([lx, ly, lx + 10 * _SCALE, ly + 3 * _SCALE], fill=_CH_AMBER)
+	draw.text((lx + 14 * _SCALE, ly), "B2B", font=f_legend, fill=_CH_MUTED, anchor="lm")
+	lx += 46 * _SCALE
+	draw.rectangle([lx, ly, lx + 10 * _SCALE, ly + 1 * _SCALE], fill=_CH_TEXT)
+	draw.text((lx + 14 * _SCALE, ly), "Total", font=f_legend, fill=_CH_MUTED, anchor="lm")
+
+	return _img_tag(img, width)
+
+
+def _svg_cm_ladder(kpi: dict, width: int = 720, height: int = 200) -> str:
+	"""CM ladder bars: tier %-of-revenue, centred on zero."""
+	tiers = [
+		("CM1", kpi["cm1_pct"]),
+		("CM2", kpi["cm2_pct"]),
+		("CM3", kpi["cm3_pct"]),
+		("EBITDA", kpi["ebitda_pct"]),
+		("EBIT", kpi["ebit_pct"]),
+		("PBT", kpi["pbt_pct"]),
+		("PAT", kpi["pat_pct"]),
+	]
+	W, H = width * _SCALE, height * _SCALE
+	img = Image.new("RGB", (W, H), _CH_WHITE)
+	draw = ImageDraw.Draw(img)
+	f_axis = _load_font(9)
+	f_label = _load_font(9, bold=True)
+	f_value = _load_font(9, bold=True)
+
+	pad_l, pad_r, pad_t, pad_b = 36 * _SCALE, 12 * _SCALE, 16 * _SCALE, 30 * _SCALE
+	chart_w = W - pad_l - pad_r
+	chart_h = H - pad_t - pad_b
+	y_zero = pad_t + chart_h / 2
+
+	max_abs = max(abs(v) for _, v in tiers) or 1
+	span = max_abs * 1.15
+
+	def y_for(v: float) -> float:
+		return y_zero - (v / span) * (chart_h / 2)
+
+	# Gridlines + labels
+	for v, label in [(span, f"{span:.1f}%"), (0, "0"), (-span, f"-{span:.1f}%")]:
+		y = y_for(v)
+		col = (60, 45, 25, 110) if v == 0 else _CH_GRID
+		draw.line([(pad_l, y), (pad_l + chart_w, y)], fill=col, width=1)
+		draw.text((pad_l - 6 * _SCALE, y - 5 * _SCALE), label, font=f_axis, fill=_CH_MUTED, anchor="rm")
+
+	n = len(tiers)
+	bar_w = chart_w / n * 0.58
+	gap = chart_w / n - bar_w
+
+	for i, (label, pct) in enumerate(tiers):
+		bx = pad_l + i * (bar_w + gap) + gap / 2
+		if pct >= 0:
+			by = y_for(pct)
+			bh = y_zero - by
+		else:
+			by = y_zero
+			bh = y_for(pct) - y_zero
+		fill = _CH_GREEN if pct >= 0 else _CH_RED
+		draw.rectangle([bx, by, bx + bar_w, by + max(bh, 1.5 * _SCALE)], fill=fill)
+
+		# Value label — above positive bars, below negative
+		if pct >= 0:
+			ty = by - 4 * _SCALE
+			anchor = "mb"
+		else:
+			ty = by + bh + 4 * _SCALE
+			anchor = "mt"
+		draw.text((bx + bar_w / 2, ty), f"{pct:.2f}%", font=f_value, fill=_CH_TEXT, anchor=anchor)
+
+		# X-axis tier label
+		draw.text(
+			(bx + bar_w / 2, pad_t + chart_h + 10 * _SCALE),
+			label,
+			font=f_label,
+			fill=_CH_MUTED,
+			anchor="mt",
+		)
+
+	return _img_tag(img, width)
+
+
+def _svg_category_bars(rows: list[dict], width: int = 720) -> str:
+	"""Horizontal bars for top categories, category name on the left."""
+	if not rows:
+		return ""
+	top = rows[:10]
+	max_val = max(r["revenue"] for r in top) or 1
+
+	row_h = 18
+	pad_l, pad_r, pad_t = 120, 80, 8
+	height = len(top) * row_h + pad_t + 12
+	W, H = width * _SCALE, height * _SCALE
+
+	img = Image.new("RGB", (W, H), _CH_WHITE)
+	draw = ImageDraw.Draw(img)
+	f_label = _load_font(10)
+	f_value = _load_font(9, bold=True)
+
+	chart_w = W - (pad_l + pad_r) * _SCALE
+
+	for i, r in enumerate(top):
+		y = (pad_t + i * row_h + row_h / 2) * _SCALE
+		bar_len = (r["revenue"] / max_val) * chart_w
+		# category label (right-aligned)
+		draw.text(((pad_l - 6) * _SCALE, y), _truncate(r["category"], 22), font=f_label, fill=_CH_TEXT, anchor="rm")
+		# bar
+		draw.rectangle(
+			[pad_l * _SCALE, y - 7 * _SCALE, pad_l * _SCALE + max(bar_len, 2), y + 7 * _SCALE],
+			fill=_CH_GREEN,
+		)
+		# value
+		draw.text(
+			(pad_l * _SCALE + bar_len + 4 * _SCALE, y),
+			f"₹{r['revenue']:.1f}L",
+			font=f_value,
+			fill=_CH_TEXT,
+			anchor="lm",
+		)
+
+	return _img_tag(img, width)
+
+
+def _svg_segment_bars(res: dict, width: int = 720) -> str:
+	"""Segment revenue bars, with % of total on the right. (unassigned) coloured amber."""
+	rows = res.get("segments", [])
+	if not rows:
+		return ""
+	top = rows[:10]
+	total = res["totals"].get("revenue") or 1
+	max_val = max(s["revenue"] for s in top) or 1
+
+	row_h = 19
+	pad_l, pad_r, pad_t = 140, 110, 8
+	height = len(top) * row_h + pad_t + 12
+	W, H = width * _SCALE, height * _SCALE
+
+	img = Image.new("RGB", (W, H), _CH_WHITE)
+	draw = ImageDraw.Draw(img)
+	f_label = _load_font(10)
+	f_value = _load_font(9, bold=True)
+	f_share = _load_font(9)
+
+	chart_w = W - (pad_l + pad_r) * _SCALE
+
+	for i, s in enumerate(top):
+		y = (pad_t + i * row_h + row_h / 2) * _SCALE
+		bar_len = (s["revenue"] / max_val) * chart_w
+		share = s["revenue"] / total * 100
+		is_un = s["segment"] == "(unassigned)"
+		fill = _CH_AMBER if is_un else _CH_BLUE
+		draw.text(
+			((pad_l - 6) * _SCALE, y),
+			_truncate(s["segment"], 20),
+			font=f_label,
+			fill=_CH_TEXT,
+			anchor="rm",
+		)
+		draw.rectangle(
+			[pad_l * _SCALE, y - 7 * _SCALE, pad_l * _SCALE + max(bar_len, 2), y + 7 * _SCALE],
+			fill=fill,
+		)
+		value_text = _inr(s["revenue"])
+		draw.text(
+			(pad_l * _SCALE + bar_len + 4 * _SCALE, y),
+			value_text,
+			font=f_value,
+			fill=_CH_TEXT,
+			anchor="lm",
+		)
+		# share in muted grey to the right of the value
+		value_w = _text_width(draw, value_text, f_value)
+		draw.text(
+			(pad_l * _SCALE + bar_len + 4 * _SCALE + value_w + 6 * _SCALE, y),
+			f"· {share:.1f}%",
+			font=f_share,
+			fill=_CH_MUTED,
+			anchor="lm",
+		)
+
+	return _img_tag(img, width)
+
+
+def _truncate(text: str, max_chars: int) -> str:
+	return text if len(text) <= max_chars else text[: max_chars - 1] + "…"
