@@ -154,6 +154,7 @@ export interface CustomerSegmentsResponse {
 	period: { from: string; to: string; label: string };
 	company: string;
 	tax_mode: TaxMode;
+	intent: IntentFilter;
 	month_keys: string[];
 	segments: CustomerSegment[];
 	totals: {

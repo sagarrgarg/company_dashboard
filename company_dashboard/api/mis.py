@@ -796,6 +796,7 @@ def get_customer_segments(
 	tax_mode: str = "incl",
 	from_date: str | None = None,
 	to_date: str | None = None,
+	intent: str = "all",
 	top_n_customers: int = 10,
 	top_n_categories: int = 10,
 ) -> dict:
@@ -826,6 +827,12 @@ def get_customer_segments(
 		if (from_date and to_date)
 		else _ttm_window()
 	)
+	# Item.custom_sales_intent filter — same shape as get_sku_assortment.
+	intent_clause = ""
+	if intent == "b2c":
+		intent_clause = "and i.custom_sales_intent like 'B2C%%'"
+	elif intent == "b2b":
+		intent_clause = "and i.custom_sales_intent like 'B2B%%'"
 
 	# Per-group rollup over the current and prior period.
 	def _rollup(p_from: date, p_to: date) -> dict[str, dict]:
@@ -843,6 +850,7 @@ def get_customer_segments(
 			from {SII_BASE_FROM}
 			left join `tabDelivery Note Item` dni on dni.name = sii.dn_detail
 			where {SII_BASE_WHERE}
+			  {intent_clause}
 			group by segment
 			""",
 			{"from": p_from, "to": p_to},
@@ -863,6 +871,7 @@ def get_customer_segments(
 			coalesce(sum({amt_expr}), 0)                  as revenue
 		from {SII_BASE_FROM}
 		where {SII_BASE_WHERE}
+		  {intent_clause}
 		group by segment, yr, mo
 		""",
 		{"from": period.from_date, "to": period.to_date},
@@ -893,6 +902,7 @@ def get_customer_segments(
 			count(distinct si.name)                                                  as invoices
 		from {SII_BASE_FROM}
 		where {SII_BASE_WHERE}
+		  {intent_clause}
 		group by segment, si.customer, customer_name
 		order by revenue desc
 		""",
@@ -923,6 +933,7 @@ def get_customer_segments(
 			coalesce(sum({amt_expr}), 0)                                             as revenue
 		from {SII_BASE_FROM}
 		where {SII_BASE_WHERE}
+		  {intent_clause}
 		group by segment, category
 		order by revenue desc
 		""",
@@ -996,6 +1007,7 @@ def get_customer_segments(
 		"period": period.as_dict(),
 		"company": _default_company(),
 		"tax_mode": mode,
+		"intent": intent if intent in ("all", "b2c", "b2b") else "all",
 		"month_keys": month_keys,
 		"segments": segments,
 		"totals": totals,

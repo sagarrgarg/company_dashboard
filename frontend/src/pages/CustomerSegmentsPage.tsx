@@ -13,7 +13,7 @@ import { TaxModeTabs } from "@/components/widgets/TaxModeTabs";
 import { KpiTile } from "@/components/widgets/KpiTile";
 import { useCustomerSegments } from "@/hooks/useOverview";
 import { cn, formatINRShort, formatPct } from "@/lib/utils";
-import type { CustomerSegment, PeriodSelection, TaxMode } from "@/types/mis";
+import type { CustomerSegment, IntentFilter, PeriodSelection, TaxMode } from "@/types/mis";
 
 interface Props {
 	taxMode: TaxMode;
@@ -25,6 +25,12 @@ interface Props {
 
 const ALL_TAB = "__all__";
 
+const INTENTS: Array<{ key: IntentFilter; label: string; hint: string }> = [
+	{ key: "all", label: "All", hint: "All sales-intent items" },
+	{ key: "b2c", label: "B2C", hint: "Items with B2C* sales intent" },
+	{ key: "b2b", label: "B2B", hint: "Items with B2B* sales intent" },
+];
+
 export function CustomerSegmentsPage({
 	taxMode,
 	onTaxModeChange,
@@ -33,7 +39,8 @@ export function CustomerSegmentsPage({
 	onCompanyResolved,
 }: Props) {
 	const [activeTab, setActiveTab] = useState<string>(ALL_TAB);
-	const { data, error, isLoading } = useCustomerSegments(taxMode, period);
+	const [intent, setIntent] = useState<IntentFilter>("all");
+	const { data, error, isLoading } = useCustomerSegments(taxMode, period, intent);
 	const res = data?.message;
 
 	useEffect(() => {
@@ -43,6 +50,7 @@ export function CustomerSegmentsPage({
 	const segments = res?.segments ?? [];
 	const active = activeTab === ALL_TAB ? null : segments.find((s) => s.segment === activeTab);
 	const taxLabel = taxMode === "incl" ? "Tax-inclusive" : "Tax-exclusive";
+	const intentLabel = intent === "all" ? "All items" : intent === "b2c" ? "B2C items only" : "B2B items only";
 
 	return (
 		<>
@@ -55,10 +63,13 @@ export function CustomerSegmentsPage({
 						{res?.company ?? "Customers"}
 					</h1>
 					<div className="text-[12px] text-text-2 mt-1.5 font-medium">
-						{res ? `${res.period.label} · ${taxLabel} · ${res.totals.segment_count} segments` : "loading…"}
+						{res
+							? `${res.period.label} · ${taxLabel} · ${intentLabel} · ${res.totals.segment_count} segments`
+							: "loading…"}
 					</div>
 				</div>
-				<div className="flex items-center gap-2">
+				<div className="flex items-center gap-2 flex-wrap justify-end">
+					<IntentTabs value={intent} onChange={setIntent} />
 					<PeriodPicker value={period} onChange={onPeriodChange} />
 					<TaxModeTabs value={taxMode} onChange={onTaxModeChange} />
 				</div>
@@ -500,6 +511,44 @@ function marginColor(pct: number): string {
 	if (pct > 5) return "text-green font-semibold";
 	if (pct > 0) return "text-amber";
 	return "text-red font-semibold";
+}
+
+function IntentTabs({
+	value,
+	onChange,
+}: {
+	value: IntentFilter;
+	onChange: (next: IntentFilter) => void;
+}) {
+	return (
+		<div
+			className="inline-flex items-center p-1 rounded-full border border-border-md bg-surface shadow-[0_1px_2px_rgba(40,30,15,.05)]"
+			role="tablist"
+			aria-label="Sales intent"
+		>
+			{INTENTS.map((it) => {
+				const active = it.key === value;
+				return (
+					<button
+						key={it.key}
+						type="button"
+						role="tab"
+						aria-selected={active}
+						title={it.hint}
+						onClick={() => onChange(it.key)}
+						className={cn(
+							"px-3.5 py-[5px] text-[11px] font-semibold rounded-full transition-all tracking-wide",
+							active
+								? "bg-green text-white shadow-[0_1px_2px_rgba(31,95,51,.25)]"
+								: "text-text-2 hover:text-text hover:bg-surface-2",
+						)}
+					>
+						{it.label}
+					</button>
+				);
+			})}
+		</div>
+	);
 }
 
 function shortMonth(key: string): string {

@@ -49,13 +49,17 @@ export function useSkuAssortment(taxMode: TaxMode, period: PeriodSelection, inte
 	);
 }
 
-export function useCustomerSegments(taxMode: TaxMode, period: PeriodSelection) {
-	const params: Record<string, string> = { tax_mode: taxMode };
+export function useCustomerSegments(
+	taxMode: TaxMode,
+	period: PeriodSelection,
+	intent: IntentFilter,
+) {
+	const params: Record<string, string> = { tax_mode: taxMode, intent };
 	if (period.kind !== "ttm") {
 		params.from_date = period.from;
 		params.to_date = period.to;
 	}
-	const key = periodKey(period);
+	const key = `${periodKey(period)}::${intent}`;
 	return useFrappeGetCall<{ message: CustomerSegmentsResponse }>(
 		"company_dashboard.api.mis.get_customer_segments",
 		params,
