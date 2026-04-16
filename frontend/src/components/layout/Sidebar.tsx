@@ -69,14 +69,26 @@ const ITEMS: NavItem[] = [
 	},
 	{
 		group: "Channel & Market",
-		to: "/channel",
-		label: "SS & Distributors",
-		disabled: true,
+		to: "/segments",
+		label: "Customer Segments",
 		icon: ICON(
 			<>
-				<rect x="1" y="9" width="3" height="6" rx="1" fill="currentColor" />
-				<rect x="6" y="5" width="3" height="10" rx="1" fill="currentColor" />
-				<rect x="11" y="2" width="3" height="13" rx="1" fill="currentColor" />
+				<circle cx="5" cy="6" r="2.2" stroke="currentColor" strokeWidth="1.4" fill="none" />
+				<circle cx="11" cy="6" r="2.2" stroke="currentColor" strokeWidth="1.4" fill="none" />
+				<path
+					d="M1.5 14c.4-2 1.8-3.2 3.5-3.2s3.1 1.2 3.5 3.2"
+					stroke="currentColor"
+					strokeWidth="1.4"
+					fill="none"
+					strokeLinecap="round"
+				/>
+				<path
+					d="M7.5 14c.4-2 1.8-3.2 3.5-3.2s3.1 1.2 3.5 3.2"
+					stroke="currentColor"
+					strokeWidth="1.4"
+					fill="none"
+					strokeLinecap="round"
+				/>
 			</>,
 		),
 	},

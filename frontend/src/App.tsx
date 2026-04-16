@@ -5,6 +5,7 @@ import { Sidebar } from "@/components/layout/Sidebar";
 import { OverviewPage } from "@/pages/OverviewPage";
 import { PnlPage } from "@/pages/PnlPage";
 import { AssortmentPage } from "@/pages/AssortmentPage";
+import { CustomerSegmentsPage } from "@/pages/CustomerSegmentsPage";
 import { ComingSoonPage } from "@/pages/ComingSoonPage";
 import type { PeriodSelection, TaxMode } from "@/types/mis";
 
@@ -131,12 +132,16 @@ export default function App() {
 								}
 							/>
 							<Route
-								path="/channel"
+								path="/segments"
 								element={
-									<ComingSoonPage
-										title="SS & Distributor Data"
-										phase="Phase 3"
-										description="Super-stockist and distributor order value trends — needs channel tagging."
+									<CustomerSegmentsPage
+										taxMode={taxMode}
+										onTaxModeChange={setTaxMode}
+										period={period}
+										onPeriodChange={setPeriod}
+										onCompanyResolved={(c) => {
+											if (c && c !== company) setCompany(c);
+										}}
 									/>
 								}
 							/>

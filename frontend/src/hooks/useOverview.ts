@@ -1,5 +1,6 @@
 import { useFrappeGetCall } from "frappe-react-sdk";
 import type {
+	CustomerSegmentsResponse,
 	IntentFilter,
 	OverviewResponse,
 	PeriodSelection,
@@ -44,6 +45,21 @@ export function useSkuAssortment(taxMode: TaxMode, period: PeriodSelection, inte
 		"company_dashboard.api.mis.get_sku_assortment",
 		params,
 		`mis.get_sku_assortment::${taxMode}::${key}`,
+		{ revalidateOnFocus: false, dedupingInterval: 60_000 },
+	);
+}
+
+export function useCustomerSegments(taxMode: TaxMode, period: PeriodSelection) {
+	const params: Record<string, string> = { tax_mode: taxMode };
+	if (period.kind !== "ttm") {
+		params.from_date = period.from;
+		params.to_date = period.to;
+	}
+	const key = periodKey(period);
+	return useFrappeGetCall<{ message: CustomerSegmentsResponse }>(
+		"company_dashboard.api.mis.get_customer_segments",
+		params,
+		`mis.get_customer_segments::${taxMode}::${key}`,
 		{ revalidateOnFocus: false, dedupingInterval: 60_000 },
 	);
 }

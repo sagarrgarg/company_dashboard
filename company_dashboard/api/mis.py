@@ -792,6 +792,213 @@ def get_sku_assortment(
 
 
 @frappe.whitelist()
+def get_customer_segments(
+	tax_mode: str = "incl",
+	from_date: str | None = None,
+	to_date: str | None = None,
+	top_n_customers: int = 10,
+	top_n_categories: int = 10,
+) -> dict:
+	"""Per-Customer-Group analysis with monthly trend and customer / category drilldown.
+
+	Customer Group is ERPNext's native channel/segment field on Customer; admins seed the
+	channel buckets (GT Distribution / Modern Trade / QuickCommerce / Ecommerce /
+	Wholesale) via ``ensure_channel_customer_groups``. The page surfaces *all* groups
+	that had revenue in the period — not just the seeded set — so promoters see the
+	whole footprint. Internal customers are excluded as everywhere else.
+
+	Output is denormalised so the frontend can render the segment tabs with no follow-up
+	calls. Heavy lift is per-group: 3 SQL passes (rollup, monthly, top-N customers and
+	categories) bounded by group count, so it stays cheap even on 50-group tenants.
+	"""
+	_require_mis_access()
+	if not _erpnext_installed():
+		frappe.throw(_("ERPNext is not installed on this site."))
+
+	mode = tax_mode if tax_mode in TAX_MODES else "incl"
+	amt_expr = TAX_MODES[mode]
+	period = (
+		_custom_window(getdate(from_date), getdate(to_date))
+		if (from_date and to_date)
+		else _ttm_window()
+	)
+
+	# Per-group rollup over the current and prior period.
+	def _rollup(p_from: date, p_to: date) -> dict[str, dict]:
+		rows = frappe.db.sql(
+			f"""
+			select
+				coalesce(si.customer_group, '(unassigned)')                                          as segment,
+				coalesce(sum({amt_expr}), 0)                                                         as revenue,
+				coalesce(sum(
+					coalesce(nullif(sii.incoming_rate, 0), dni.incoming_rate, 0) * sii.stock_qty
+				), 0)                                                                                 as cogs,
+				coalesce(sum(case when sii.incoming_rate > 0 or dni.incoming_rate > 0 then {amt_expr} else 0 end), 0) as rev_valuated,
+				count(distinct si.customer)                                                          as customers,
+				count(distinct si.name)                                                              as invoices
+			from {SII_BASE_FROM}
+			left join `tabDelivery Note Item` dni on dni.name = sii.dn_detail
+			where {SII_BASE_WHERE}
+			group by segment
+			""",
+			{"from": p_from, "to": p_to},
+			as_dict=True,
+		)
+		return {r["segment"]: r for r in rows}
+
+	current = _rollup(period.from_date, period.to_date)
+	prior = _rollup(period.prior_from, period.prior_to)
+
+	# Per-group monthly revenue (single query, pivoted client-side here).
+	monthly_rows = frappe.db.sql(
+		f"""
+		select
+			coalesce(si.customer_group, '(unassigned)')   as segment,
+			year(si.posting_date)                         as yr,
+			month(si.posting_date)                        as mo,
+			coalesce(sum({amt_expr}), 0)                  as revenue
+		from {SII_BASE_FROM}
+		where {SII_BASE_WHERE}
+		group by segment, yr, mo
+		""",
+		{"from": period.from_date, "to": period.to_date},
+		as_dict=True,
+	)
+	month_keys: list[str] = []
+	cursor = period.from_date.replace(day=1)
+	while cursor <= period.to_date:
+		month_keys.append(f"{cursor.year}-{cursor.month:02d}")
+		cursor = getdate(add_months(cursor, 1))
+
+	monthly_per_segment: dict[str, dict[str, float]] = {}
+	for r in monthly_rows:
+		seg = r["segment"]
+		key = f"{int(r['yr'])}-{int(r['mo']):02d}"
+		monthly_per_segment.setdefault(seg, {k: 0.0 for k in month_keys})
+		if key in monthly_per_segment[seg]:
+			monthly_per_segment[seg][key] = round(flt(r["revenue"]) / 1_00_000, 2)
+
+	# Top customers per segment.
+	top_customers_rows = frappe.db.sql(
+		f"""
+		select
+			coalesce(si.customer_group, '(unassigned)')                              as segment,
+			si.customer                                                              as customer,
+			coalesce(c.customer_name, si.customer)                                   as customer_name,
+			coalesce(sum({amt_expr}), 0)                                             as revenue,
+			count(distinct si.name)                                                  as invoices
+		from {SII_BASE_FROM}
+		where {SII_BASE_WHERE}
+		group by segment, si.customer, customer_name
+		order by revenue desc
+		""",
+		{"from": period.from_date, "to": period.to_date},
+		as_dict=True,
+	)
+	top_customers_per_segment: dict[str, list[dict]] = {}
+	for r in top_customers_rows:
+		seg = r["segment"]
+		bucket = top_customers_per_segment.setdefault(seg, [])
+		if len(bucket) < int(top_n_customers):
+			bucket.append(
+				{
+					"customer": r["customer"],
+					"customer_name": r["customer_name"],
+					"revenue": flt(r["revenue"]),
+					"invoices": int(r["invoices"]),
+				}
+			)
+
+	# Top categories per segment (Item.item_group share of segment revenue).
+	top_cat_rows = frappe.db.sql(
+		f"""
+		select
+			coalesce(si.customer_group, '(unassigned)')                              as segment,
+			coalesce(i.item_group, 'Unclassified')                                   as category,
+			count(distinct sii.item_code)                                            as sku_count,
+			coalesce(sum({amt_expr}), 0)                                             as revenue
+		from {SII_BASE_FROM}
+		where {SII_BASE_WHERE}
+		group by segment, category
+		order by revenue desc
+		""",
+		{"from": period.from_date, "to": period.to_date},
+		as_dict=True,
+	)
+	top_cat_per_segment: dict[str, list[dict]] = {}
+	for r in top_cat_rows:
+		seg = r["segment"]
+		bucket = top_cat_per_segment.setdefault(seg, [])
+		if len(bucket) < int(top_n_categories):
+			bucket.append(
+				{
+					"category": r["category"],
+					"sku_count": int(r["sku_count"]),
+					"revenue": flt(r["revenue"]),
+				}
+			)
+
+	# Assemble per-segment payload, sorted by revenue desc.
+	segments: list[dict] = []
+	for seg, cur in current.items():
+		rev = flt(cur["revenue"])
+		rev_val = flt(cur["rev_valuated"])
+		cogs = flt(cur["cogs"])
+		gp = rev_val - cogs
+		gm_pct = (gp / rev_val * 100) if rev_val else 0.0
+		coverage = (rev_val / rev * 100) if rev else 0.0
+		invoices = int(cur["invoices"])
+		customers = int(cur["customers"])
+		prev = prior.get(seg, {})
+		prev_rev = flt(prev.get("revenue", 0))
+		yoy = ((rev - prev_rev) / prev_rev * 100) if prev_rev else None
+		segments.append(
+			{
+				"segment": seg,
+				"revenue": rev,
+				"prior_revenue": prev_rev,
+				"yoy_pct": yoy,
+				"customers": customers,
+				"invoices": invoices,
+				"aov": (rev / invoices) if invoices else 0.0,
+				"avg_customer_value": (rev / customers) if customers else 0.0,
+				"gp": gp,
+				"gm_pct": gm_pct,
+				"gm_coverage_pct": coverage,
+				"monthly": monthly_per_segment.get(seg, {k: 0.0 for k in month_keys}),
+				"top_customers": top_customers_per_segment.get(seg, []),
+				"top_categories": top_cat_per_segment.get(seg, []),
+			}
+		)
+	segments.sort(key=lambda s: s["revenue"], reverse=True)
+
+	totals = {
+		"revenue": sum(s["revenue"] for s in segments),
+		"customers": sum(s["customers"] for s in segments),
+		"invoices": sum(s["invoices"] for s in segments),
+		"gp": sum(s["gp"] for s in segments),
+		"segment_count": len(segments),
+	}
+	totals["aov"] = (totals["revenue"] / totals["invoices"]) if totals["invoices"] else 0.0
+	totals["gm_pct"] = (
+		sum(s["gp"] for s in segments)
+		/ sum(s["revenue"] for s in segments if s["gm_coverage_pct"] > 0)
+		* 100
+		if sum(s["revenue"] for s in segments if s["gm_coverage_pct"] > 0)
+		else 0.0
+	)
+
+	return {
+		"period": period.as_dict(),
+		"company": _default_company(),
+		"tax_mode": mode,
+		"month_keys": month_keys,
+		"segments": segments,
+		"totals": totals,
+	}
+
+
+@frappe.whitelist()
 def create_mis_user(
 	email: str,
 	first_name: str,

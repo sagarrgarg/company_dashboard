@@ -120,6 +120,53 @@ export interface SkuRow {
 	cm3_pct: number;
 }
 
+export interface SegmentTopCustomer {
+	customer: string;
+	customer_name: string;
+	revenue: number;
+	invoices: number;
+}
+
+export interface SegmentTopCategory {
+	category: string;
+	sku_count: number;
+	revenue: number;
+}
+
+export interface CustomerSegment {
+	segment: string;
+	revenue: number;
+	prior_revenue: number;
+	yoy_pct: number | null;
+	customers: number;
+	invoices: number;
+	aov: number;
+	avg_customer_value: number;
+	gp: number;
+	gm_pct: number;
+	gm_coverage_pct: number;
+	monthly: Record<string, number>;
+	top_customers: SegmentTopCustomer[];
+	top_categories: SegmentTopCategory[];
+}
+
+export interface CustomerSegmentsResponse {
+	period: { from: string; to: string; label: string };
+	company: string;
+	tax_mode: TaxMode;
+	month_keys: string[];
+	segments: CustomerSegment[];
+	totals: {
+		revenue: number;
+		customers: number;
+		invoices: number;
+		gp: number;
+		segment_count: number;
+		aov: number;
+		gm_pct: number;
+	};
+}
+
 export interface SkuAssortmentResponse {
 	period: { from: string; to: string; label: string };
 	company: string;
