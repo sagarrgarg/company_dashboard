@@ -6,7 +6,7 @@ import { RevenueMixChart } from "@/components/widgets/RevenueMixChart";
 import { CategoryTable } from "@/components/widgets/CategoryTable";
 import { TaxModeTabs } from "@/components/widgets/TaxModeTabs";
 import { PeriodPicker } from "@/components/widgets/PeriodPicker";
-import { DownloadExcelButton } from "@/components/widgets/DownloadExcelButton";
+import { DownloadButtons } from "@/components/widgets/DownloadButtons";
 import { useOverview } from "@/hooks/useOverview";
 import { cn, formatDelta, formatINRShort, formatPct } from "@/lib/utils";
 import type { OverviewResponse, PeriodSelection, TaxMode } from "@/types/mis";
@@ -142,7 +142,7 @@ function OverviewBody({
 				</div>
 				<div className="flex flex-col items-end gap-2.5">
 					<div className="flex items-center gap-2 flex-wrap justify-end">
-						<DownloadExcelButton taxMode={taxMode} period={period} />
+						<DownloadButtons taxMode={taxMode} period={period} />
 						<PeriodPicker value={period} onChange={onPeriodChange} />
 						<TaxModeTabs value={taxMode} onChange={onTaxModeChange} />
 					</div>

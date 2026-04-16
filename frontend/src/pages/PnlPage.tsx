@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { PeriodPicker } from "@/components/widgets/PeriodPicker";
 import { TaxModeTabs } from "@/components/widgets/TaxModeTabs";
-import { DownloadExcelButton } from "@/components/widgets/DownloadExcelButton";
+import { DownloadButtons } from "@/components/widgets/DownloadButtons";
 import { PnlTable } from "@/components/widgets/PnlTable";
 import { PnlWaterfallChart } from "@/components/widgets/PnlWaterfallChart";
 import { useOverview } from "@/hooks/useOverview";
@@ -146,7 +146,7 @@ function Shell({
 				</div>
 				<div className="flex flex-col items-end gap-2.5">
 					<div className="flex items-center gap-2 flex-wrap justify-end">
-						<DownloadExcelButton taxMode={taxMode} period={period} />
+						<DownloadButtons taxMode={taxMode} period={period} />
 						<PeriodPicker value={period} onChange={onPeriodChange} />
 						<TaxModeTabs value={taxMode} onChange={onTaxModeChange} />
 					</div>
