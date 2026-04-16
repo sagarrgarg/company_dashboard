@@ -212,13 +212,30 @@ def get_configured_accounts(fieldname: str) -> list[str]:
 	return [r.account for r in rows if getattr(r, "account", None)]
 
 
+MIS_VIEWER_ROLE = "MIS Viewer"
+
+
+def ensure_mis_viewer_role() -> None:
+	"""Idempotently create the read-only MIS Viewer role used to gate /mis access."""
+	if frappe.db.exists("Role", MIS_VIEWER_ROLE):
+		return
+	role = frappe.new_doc("Role")
+	role.role_name = MIS_VIEWER_ROLE
+	role.desk_access = 1
+	role.disabled = 0
+	role.flags.ignore_permissions = True
+	role.insert()
+
+
 def seed_defaults() -> dict:
 	"""Populate the singleton with auto-discovered accounts for every multiselect.
 
 	Idempotent: only fills fields that are currently empty, so re-running after the
 	admin has customised any field won't clobber their choices. Called from
-	``after_install`` and ``after_migrate``.
+	``after_install`` and ``after_migrate``. Also ensures the ``MIS Viewer`` role
+	exists so admins can grant dashboard-only access.
 	"""
+	ensure_mis_viewer_role()
 	doc = frappe.get_single("Company Dashboard Settings")
 	added: dict[str, int] = {f: 0 for f in _MULTISELECT_FIELDS}
 

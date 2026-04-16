@@ -4,6 +4,7 @@ import { Route, Routes, BrowserRouter } from "react-router-dom";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { OverviewPage } from "@/pages/OverviewPage";
 import { PnlPage } from "@/pages/PnlPage";
+import { AssortmentPage } from "@/pages/AssortmentPage";
 import { ComingSoonPage } from "@/pages/ComingSoonPage";
 import type { PeriodSelection, TaxMode } from "@/types/mis";
 
@@ -108,10 +109,14 @@ export default function App() {
 							<Route
 								path="/assortment"
 								element={
-									<ComingSoonPage
-										title="SKU Assortment"
-										phase="Phase 2"
-										description="Item master with search, filter pills by category and channel."
+									<AssortmentPage
+										taxMode={taxMode}
+										onTaxModeChange={setTaxMode}
+										period={period}
+										onPeriodChange={setPeriod}
+										onCompanyResolved={(c) => {
+											if (c && c !== company) setCompany(c);
+										}}
 									/>
 								}
 							/>

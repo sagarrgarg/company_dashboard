@@ -30,8 +30,9 @@ Frappe v15 app hosting a **React SPA dashboard at `/mis`** ("Consumer Business M
 - **Source:** `frontend/` — Vite 5 + React 18 + TypeScript + Tailwind + `frappe-react-sdk` + recharts + Radix. Green + beige light-mode theme (CSS vars in `src/index.css`, Tailwind tokens mirror them).
 - **Design reference:** `sample.html` at the app root is the authoritative visual spec for the 7 MIS pages. Match its palette, type, card/KPI shapes, and grids when building any new page.
 - **Build output:** `company_dashboard/public/company_dashboard/` → served at `/assets/company_dashboard/company_dashboard/`. `yarn build` also overwrites `company_dashboard/www/mis.html` via `copy-html-entry.js` (injects the Jinja `{{ boot }}` + `{{ csrf_token }}` tags before `</head>`).
-- **APIs:** `company_dashboard/api/mis.py` — one whitelisted method per page (`get_overview`, and future `get_pnl`, `get_working_capital`, …). All return `{period, kpi, ...}`-shaped dicts; values in ₹ lakhs for chart series.
-- **Phase map:** P1 (done) = Overview. P2 = P&L Waterfall · SKU Assortment · Working Capital. P3 = SKU Analysis · SS/Distributors · TAM (TAM needs a `MIS Settings` DocType for editable market constants).
+- **APIs:** `company_dashboard/api/mis.py` — one whitelisted method per page (`get_overview`, `get_sku_assortment`, `get_fiscal_years`, `create_mis_user`, …). All return `{period, kpi, ...}`-shaped dicts.
+- **Access control:** `MIS_ACCESS_ROLES = {"System Manager", "MIS Viewer"}`. The `MIS Viewer` role is auto-created in `seed_defaults` (after_install + after_migrate). The SPA shell (`www/mis.py::get_context`) and every whitelisted method use `_require_mis_access()` — anyone without one of these roles gets a 403 on `/mis` and on direct `/api/method/company_dashboard.api.mis.*` calls. Provision dashboard-only users with `frappe.call("company_dashboard.api.mis.create_mis_user", email=..., first_name=..., password=...)` (System-Manager-only). The helper sets `user_type="System User"` and clears all other roles so the user lands on /mis with no other Frappe surface area.
+- **Phase map:** P1 ✅ Overview. P2 ✅ P&L Waterfall · ✅ SKU Assortment · ☐ Working Capital. P3 ☐ SKU Analysis · ☐ SS/Distributors · ☐ TAM.
 
 ### Frontend dev workflow
 

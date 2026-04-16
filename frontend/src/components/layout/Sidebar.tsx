@@ -47,7 +47,6 @@ const ITEMS: NavItem[] = [
 		group: "Assortment",
 		to: "/assortment",
 		label: "SKU Assortment",
-		disabled: true,
 		icon: ICON(
 			<>
 				<rect x="1" y="1" width="14" height="3" rx="1" fill="currentColor" opacity=".7" />

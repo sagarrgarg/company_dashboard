@@ -94,6 +94,51 @@ export interface FiscalYear {
 	to: string;
 }
 
+export type IntentFilter = "all" | "b2c" | "b2b";
+
+export interface SkuRow {
+	item_code: string;
+	item_name: string;
+	item_group: string;
+	intent: string;
+	revenue: number;
+	cogs: number;
+	gp: number;
+	gm_pct: number;
+	qty: number;
+	invoices: number;
+	monthly: Record<string, number>;
+	alloc_freight: number;
+	alloc_packaging: number;
+	alloc_commission: number;
+	alloc_scheme: number;
+	alloc_marketing: number;
+	alloc_variable: number;
+	cm2: number;
+	cm2_pct: number;
+	cm3: number;
+	cm3_pct: number;
+}
+
+export interface SkuAssortmentResponse {
+	period: { from: string; to: string; label: string };
+	company: string;
+	tax_mode: TaxMode;
+	intent: IntentFilter;
+	month_keys: string[]; // "YYYY-MM"
+	rows: SkuRow[];
+	totals: { sku_count: number; revenue: number; cogs: number; qty: number };
+	allocation: {
+		basis: string;
+		freight_pct: number;
+		packaging_pct: number;
+		commission_pct: number;
+		scheme_pct: number;
+		marketing_pct: number;
+		variable_pct: number;
+	};
+}
+
 /** CM2 deductions: freight + packaging + transaction fees/commissions + schemes. */
 export interface Cm2Inputs {
 	freight_total: number;

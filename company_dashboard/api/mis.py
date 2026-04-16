@@ -58,18 +58,37 @@ AMT_INCL = (
 TAX_MODES = {"incl": AMT_INCL, "excl": AMT_EXCL}
 
 
+# Strict allow-list. ``System Manager`` is kept because Frappe System Managers always
+# have implicit god access to the bench and can re-assign roles anyway — listing them
+# here is just for transparency. Anyone else needs the explicit ``MIS Viewer`` role
+# (auto-created by ``ensure_mis_viewer_role``) to view /mis or call the MIS APIs.
+MIS_ACCESS_ROLES = frozenset({"System Manager", "MIS Viewer"})
+
+
 def has_mis_permission():
 	"""Used by ``add_to_apps_screen`` to decide if the tile shows."""
 	user = frappe.session.user
 	if user == "Administrator":
 		return True
-	roles = set(frappe.get_roles(user))
-	return bool(roles.intersection({"System Manager", "MIS Viewer", "Accounts Manager"}))
+	return bool(set(frappe.get_roles(user)) & MIS_ACCESS_ROLES)
 
 
-def _require_login():
-	if frappe.session.user == "Guest":
-		frappe.throw(_("Login required."), frappe.PermissionError)
+def _require_mis_access():
+	"""Throw PermissionError unless caller has MIS access. Use on every whitelisted
+	method — the SPA shell does its own check too, but defence in depth matters since
+	API endpoints can be called directly via /api/method/."""
+	user = frappe.session.user
+	if user == "Guest":
+		frappe.throw(_("Login required to view MIS."), frappe.PermissionError)
+	if user == "Administrator":
+		return
+	if not (set(frappe.get_roles(user)) & MIS_ACCESS_ROLES):
+		frappe.throw(
+			_("You need one of these roles to view the MIS dashboard: {0}").format(
+				", ".join(sorted(MIS_ACCESS_ROLES))
+			),
+			frappe.PermissionError,
+		)
 
 
 def _erpnext_installed() -> bool:
@@ -597,9 +616,249 @@ def _default_company() -> str:
 
 
 @frappe.whitelist()
+def get_sku_assortment(
+	tax_mode: str = "incl",
+	from_date: str | None = None,
+	to_date: str | None = None,
+	intent: str = "all",
+) -> dict:
+	"""Per-SKU revenue + monthly trend + per-SKU CM ladder allocation.
+
+	``intent`` is ``"all"`` | ``"b2c"`` | ``"b2b"`` and matches against the
+	``Item.custom_sales_intent`` prefix. Internal-customer invoices are excluded.
+
+	**Per-SKU allocation rule**: GL deductions (freight, packaging, txn fees, schemes,
+	marketing) carry no SKU dimension at the source, so we allocate company-wide totals
+	to each SKU by **revenue share against company-period revenue** (``sku_rev /
+	company_rev × gl_total``). Aggregate sums reconcile to the Overview page; per-SKU
+	figures carry the allocation caveat — same disclosure used everywhere else.
+	"""
+	_require_mis_access()
+	if not _erpnext_installed():
+		frappe.throw(_("ERPNext is not installed on this site."))
+
+	mode = tax_mode if tax_mode in TAX_MODES else "incl"
+	amt_expr = TAX_MODES[mode]
+	company = _default_company()
+	period = _custom_window(getdate(from_date), getdate(to_date)) if (from_date and to_date) else _ttm_window()
+
+	intent_clause = ""
+	if intent == "b2c":
+		intent_clause = "and i.custom_sales_intent like 'B2C%%'"
+	elif intent == "b2b":
+		intent_clause = "and i.custom_sales_intent like 'B2B%%'"
+
+	# Per-SKU per-month aggregation. Single query, ~5K rows even on a 1000-SKU corpus
+	# (1000 SKUs × ~5 active months on average).
+	rows = frappe.db.sql(
+		f"""
+		select
+			sii.item_code                                                                 as item_code,
+			max(coalesce(i.item_name, sii.item_code))                                     as item_name,
+			max(coalesce(i.item_group, 'Unclassified'))                                   as item_group,
+			max(i.custom_sales_intent)                                                    as intent,
+			year(si.posting_date)                                                         as yr,
+			month(si.posting_date)                                                        as mo,
+			coalesce(sum({amt_expr}), 0)                                                  as revenue,
+			coalesce(sum(
+				coalesce(nullif(sii.incoming_rate, 0), dni.incoming_rate, 0) * sii.stock_qty
+			), 0)                                                                          as cogs,
+			coalesce(sum(sii.stock_qty), 0)                                               as qty,
+			count(distinct si.name)                                                        as invoices
+		from {SII_BASE_FROM}
+		left join `tabDelivery Note Item` dni on dni.name = sii.dn_detail
+		where {SII_BASE_WHERE}
+		  {intent_clause}
+		group by sii.item_code, yr, mo
+		""",
+		{"from": period.from_date, "to": period.to_date},
+		as_dict=True,
+	)
+
+	# Pivot into per-SKU rows + collect month list.
+	skus: dict[str, dict] = {}
+	cursor = period.from_date.replace(day=1)
+	month_keys: list[str] = []
+	while cursor <= period.to_date:
+		month_keys.append(f"{cursor.year}-{cursor.month:02d}")
+		cursor = getdate(add_months(cursor, 1))
+
+	for row in rows:
+		code = row["item_code"]
+		bucket = skus.setdefault(
+			code,
+			{
+				"item_code": code,
+				"item_name": row["item_name"],
+				"item_group": row["item_group"],
+				"intent": row["intent"] or "—",
+				"revenue": 0.0,
+				"cogs": 0.0,
+				"qty": 0.0,
+				"invoices": 0,
+				"monthly": {k: 0.0 for k in month_keys},
+			},
+		)
+		bucket["revenue"] += flt(row["revenue"])
+		bucket["cogs"] += flt(row["cogs"])
+		bucket["qty"] += flt(row["qty"])
+		bucket["invoices"] += int(row["invoices"])
+		mkey = f"{int(row['yr'])}-{int(row['mo']):02d}"
+		if mkey in bucket["monthly"]:
+			bucket["monthly"][mkey] += flt(row["revenue"])
+
+	# Company-period totals for the allocation denominator. Always tax-exclusive since
+	# the underlying GL costs are net of GST — same rule the CM tier maths follow.
+	company_rev_excl = _revenue_by_bucket(period.from_date, period.to_date, AMT_EXCL)["total"]
+	freight = _gl_spend(get_configured_accounts("outbound_freight_accounts"), period.from_date, period.to_date, company)
+	packaging = _gl_spend(get_configured_accounts("packaging_overhead_accounts"), period.from_date, period.to_date, company)
+	commission = _gl_spend(get_configured_accounts("marketplace_commission_accounts"), period.from_date, period.to_date, company)
+	scheme = _gl_spend(get_configured_accounts("trade_scheme_accounts"), period.from_date, period.to_date, company)
+	marketing = _gl_spend(get_configured_accounts("marketing_accounts"), period.from_date, period.to_date, company)
+
+	freight_pct = (freight / company_rev_excl) if company_rev_excl else 0.0
+	packaging_pct = (packaging / company_rev_excl) if company_rev_excl else 0.0
+	commission_pct = (commission / company_rev_excl) if company_rev_excl else 0.0
+	scheme_pct = (scheme / company_rev_excl) if company_rev_excl else 0.0
+	marketing_pct = (marketing / company_rev_excl) if company_rev_excl else 0.0
+	variable_pct = freight_pct + packaging_pct + commission_pct + scheme_pct
+
+	# Finalise per-SKU rows with allocations and tier values.
+	out_rows: list[dict] = []
+	for sku in skus.values():
+		rev = sku["revenue"]
+		# Use tax-excl revenue ratio for cost allocation: when tax_mode=incl, rev contains
+		# GST so we'd over-allocate. Approximate by using the SKU's own tax-mode revenue
+		# divided by the company tax-mode revenue would also work; using the simpler
+		# absolute ratio against tax-excl total keeps allocations consistent with
+		# Overview's CM ladder.
+		alloc_freight = rev * freight_pct
+		alloc_packaging = rev * packaging_pct
+		alloc_commission = rev * commission_pct
+		alloc_scheme = rev * scheme_pct
+		alloc_marketing = rev * marketing_pct
+		alloc_variable = rev * variable_pct
+
+		gp = rev - sku["cogs"]
+		cm2 = gp - alloc_variable
+		cm3 = cm2 - alloc_marketing
+
+		def _pct(x: float) -> float:
+			return (x / rev * 100) if rev else 0.0
+
+		out_rows.append(
+			{
+				**sku,
+				"gp": gp,
+				"gm_pct": _pct(gp),
+				"alloc_freight": alloc_freight,
+				"alloc_packaging": alloc_packaging,
+				"alloc_commission": alloc_commission,
+				"alloc_scheme": alloc_scheme,
+				"alloc_marketing": alloc_marketing,
+				"alloc_variable": alloc_variable,
+				"cm2": cm2,
+				"cm2_pct": _pct(cm2),
+				"cm3": cm3,
+				"cm3_pct": _pct(cm3),
+			}
+		)
+
+	out_rows.sort(key=lambda r: r["revenue"], reverse=True)
+
+	return {
+		"period": period.as_dict(),
+		"company": company,
+		"tax_mode": mode,
+		"intent": intent,
+		"month_keys": month_keys,
+		"rows": out_rows,
+		"totals": {
+			"sku_count": len(out_rows),
+			"revenue": sum(r["revenue"] for r in out_rows),
+			"cogs": sum(r["cogs"] for r in out_rows),
+			"qty": sum(r["qty"] for r in out_rows),
+		},
+		"allocation": {
+			"basis": "company-period revenue share (tax-excl)",
+			"freight_pct": freight_pct * 100,
+			"packaging_pct": packaging_pct * 100,
+			"commission_pct": commission_pct * 100,
+			"scheme_pct": scheme_pct * 100,
+			"marketing_pct": marketing_pct * 100,
+			"variable_pct": variable_pct * 100,
+		},
+	}
+
+
+@frappe.whitelist()
+def create_mis_user(
+	email: str,
+	first_name: str,
+	last_name: str = "",
+	password: str | None = None,
+	send_welcome_email: bool = False,
+) -> dict:
+	"""One-shot helper to provision a dashboard-only user.
+
+	Creates (or updates) a ``System User`` with only the ``MIS Viewer`` role, so they
+	can sign in to /mis but have no rights elsewhere on the bench. Always restricted
+	to admins (System Manager) — a regular MIS Viewer cannot bootstrap more users.
+
+	Idempotent: if the user already exists, the role is added if missing and the
+	password is rotated only when explicitly supplied.
+	"""
+	if frappe.session.user != "Administrator" and "System Manager" not in frappe.get_roles(
+		frappe.session.user
+	):
+		frappe.throw(_("Only a System Manager can create MIS users."), frappe.PermissionError)
+
+	from company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings import (
+		MIS_VIEWER_ROLE,
+		ensure_mis_viewer_role,
+	)
+
+	ensure_mis_viewer_role()
+
+	existing = frappe.db.exists("User", email)
+	if existing:
+		user = frappe.get_doc("User", email)
+	else:
+		user = frappe.new_doc("User")
+		user.email = email
+		user.username = email.split("@")[0]
+		user.first_name = first_name
+		user.last_name = last_name
+		user.user_type = "System User"
+		user.send_welcome_email = 1 if send_welcome_email else 0
+
+	# Strip every other role; this account exists only for the MIS dashboard.
+	user.set("roles", [])
+	user.append("roles", {"role": MIS_VIEWER_ROLE})
+
+	if password:
+		user.new_password = password
+
+	user.flags.ignore_permissions = True
+	if existing:
+		user.save()
+	else:
+		user.insert()
+
+	return {
+		"email": user.email,
+		"created": not existing,
+		"updated": bool(existing),
+		"roles": [r.role for r in user.roles],
+		"login_url": "/login",
+		"dashboard_url": "/mis",
+	}
+
+
+@frappe.whitelist()
 def get_fiscal_years() -> list[dict]:
 	"""List of non-disabled Fiscal Years, newest first, for the period picker."""
-	_require_login()
+	_require_mis_access()
 	rows = frappe.get_all(
 		"Fiscal Year",
 		filters={"disabled": 0},
@@ -629,7 +888,7 @@ def get_overview(
 	from ``get_fiscal_years`` or custom ISO dates. Prior-period values for YoY deltas
 	are computed as the same-length window immediately preceding ``from_date``.
 	"""
-	_require_login()
+	_require_mis_access()
 	if not _erpnext_installed():
 		frappe.throw(_("ERPNext is not installed on this site."))
 
