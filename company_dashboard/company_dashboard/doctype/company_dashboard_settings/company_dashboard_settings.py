@@ -214,6 +214,16 @@ def get_configured_accounts(fieldname: str) -> list[str]:
 
 MIS_VIEWER_ROLE = "MIS Viewer"
 
+# ERPNext "Market Segment" master records seeded on first install. Used by the SS &
+# Distributor / channel pages to bucket customers by go-to-market channel. Add to this
+# tuple to ship a new default — existing rows on a site are never touched.
+DEFAULT_MARKET_SEGMENTS = (
+	"GT Distribution",
+	"QuickCommerce",
+	"Ecommerce",
+	"Wholesale",
+)
+
 
 def ensure_mis_viewer_role() -> None:
 	"""Idempotently create the read-only MIS Viewer role used to gate /mis access."""
@@ -227,6 +237,28 @@ def ensure_mis_viewer_role() -> None:
 	role.insert()
 
 
+def ensure_market_segments() -> int:
+	"""Insert MIS default Market Segment records that don't already exist.
+
+	Skipped if the ``Market Segment`` doctype isn't on this site (i.e. ERPNext isn't
+	installed) — keeps the seed safe to call on a Frappe-only bench. Returns the count
+	of newly-created rows so callers can log the diff.
+	"""
+	# ``table_exists`` adds the ``tab`` prefix itself — pass the bare doctype name.
+	if not frappe.db.table_exists("Market Segment"):
+		return 0
+	added = 0
+	for segment in DEFAULT_MARKET_SEGMENTS:
+		if frappe.db.exists("Market Segment", segment):
+			continue
+		doc = frappe.new_doc("Market Segment")
+		doc.market_segment = segment
+		doc.flags.ignore_permissions = True
+		doc.insert()
+		added += 1
+	return added
+
+
 def seed_defaults() -> dict:
 	"""Populate the singleton with auto-discovered accounts for every multiselect.
 
@@ -236,8 +268,10 @@ def seed_defaults() -> dict:
 	exists so admins can grant dashboard-only access.
 	"""
 	ensure_mis_viewer_role()
+	market_segments_added = ensure_market_segments()
 	doc = frappe.get_single("Company Dashboard Settings")
 	added: dict[str, int] = {f: 0 for f in _MULTISELECT_FIELDS}
+	added["market_segments"] = market_segments_added
 
 	for fieldname, include, exclude in _SEED_MAP:
 		if doc.get(fieldname):
