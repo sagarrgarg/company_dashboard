@@ -215,36 +215,50 @@ def get_configured_accounts(fieldname: str) -> list[str]:
 	return [r.account for r in rows if getattr(r, "account", None)]
 
 
-def get_allowed_customer_groups() -> list[str]:
-	"""Expanded list of Customer Group names admins want surfaced on /mis/segments.
+def get_segment_root_map() -> dict[str, str]:
+	"""Map every allowed Customer Group (and its NSM descendants) to the nearest
+	admin-selected root from ``customer_segment_groups``.
 
-	Each row in ``customer_segment_groups`` brings its full sub-tree (descendants) via
-	a single nested-set walk — so picking a parent like "Channel" auto-includes every
-	child channel group, present and future. Returns ``[]`` when the multiselect is
-	empty; callers treat that as "show all groups with sales".
+	The /mis/segments page uses this to **fold sub-groups back into their selected
+	parent**, so picking "Channel" shows one row named "Channel" with all its child
+	channel groups' revenue rolled up — instead of one row per child.
+
+	Empty dict when no scope is configured; callers treat that as "show every group".
 	"""
 	try:
 		doc = frappe.get_cached_doc("Company Dashboard Settings", "Company Dashboard Settings")
 	except frappe.DoesNotExistError:
-		return []
+		return {}
 	rows = doc.get("customer_segment_groups") or []
 	roots = [r.customer_group for r in rows if getattr(r, "customer_group", None)]
 	if not roots:
-		return []
+		return {}
+	root_map: dict[str, str] = {}
+	for root in roots:
+		if not frappe.db.exists("Customer Group", root):
+			continue
+		# NSM range walk in one SQL — handles any tree depth.
+		descendants = frappe.db.sql(
+			"""
+			select cg.name
+			from `tabCustomer Group` cg
+			join `tabCustomer Group` parent on parent.name = %s
+			where cg.lft >= parent.lft and cg.rgt <= parent.rgt
+			""",
+			(root,),
+			pluck=True,
+		)
+		for name in descendants:
+			# First-selected-root wins when two selected roots contain the same name
+			# (should only happen if admin picks both an ancestor and its descendant).
+			root_map.setdefault(name, root)
+	return root_map
 
-	# Single SQL using the NSM lft/rgt range — handles arbitrarily deep trees in one
-	# round trip and includes the root rows themselves.
-	descendants = frappe.db.sql(
-		"""
-		select cg.name
-		from `tabCustomer Group` cg
-		join `tabCustomer Group` parent on parent.name in %(roots)s
-		where cg.lft >= parent.lft and cg.rgt <= parent.rgt
-		""",
-		{"roots": tuple(roots)},
-		pluck=True,
-	)
-	return sorted(set(descendants))
+
+def get_allowed_customer_groups() -> list[str]:
+	"""Flat list of allowed names for the WHERE-IN filter on /mis/segments. Empty when
+	no scope is configured."""
+	return sorted(get_segment_root_map().keys())
 
 
 MIS_VIEWER_ROLE = "MIS Viewer"

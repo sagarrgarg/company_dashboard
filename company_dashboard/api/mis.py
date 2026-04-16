@@ -26,6 +26,7 @@ from frappe.utils import add_months, flt, getdate, today
 from company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings import (
 	get_allowed_customer_groups,
 	get_configured_accounts,
+	get_segment_root_map,
 )
 
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -835,66 +836,79 @@ def get_customer_segments(
 	elif intent == "b2b":
 		intent_clause = "and i.custom_sales_intent like 'B2B%%'"
 
-	# Customer Group scope from Company Dashboard Settings.
-	#   Empty list → GROUP-pivot: every Customer Group with sales (as before).
-	#   Non-empty  → CUSTOMER-pivot: list individual Customers inside the scoped
-	#                groups (+ their NSM descendants), each as its own row with
-	#                consolidated metrics. Sub-groups are NOT surfaced as separate
-	#                rows — the admin picked the scope, the page drills one level
-	#                deeper to the actual accounts.
-	allowed_groups = get_allowed_customer_groups()
+	# Customer Group scope from Company Dashboard Settings. Empty → every group with
+	# sales (plus (unassigned)). Non-empty → filter to those groups + their NSM
+	# descendants, and roll descendant rows UP into the admin-selected parent via
+	# ``root_map`` — so picking a parent like "Channel" yields a single "Channel" row
+	# aggregating all children, rather than one row per child.
+	scope_map = get_segment_root_map()
+	allowed_groups = list(scope_map.keys())
 	scope_params: dict[str, object] = {}
 	scope_clause = ""
-	customer_pivot = bool(allowed_groups)
-	if customer_pivot:
+	if allowed_groups:
 		scope_clause = "and c.customer_group in %(allowed_groups)s"
 		scope_params["allowed_groups"] = tuple(allowed_groups)
 
-	# SQL fragments that differ between the two pivot modes.
-	if customer_pivot:
-		pivot_select = "si.customer as segment, coalesce(max(c.customer_name), si.customer) as segment_label"
-		pivot_groupby = "segment"
-		# In customer-pivot mode, no need for the pivot alias to be trimmed by COALESCE
-		# since we've filtered out (unassigned) via the scope clause.
-	else:
-		pivot_select = "coalesce(c.customer_group, '(unassigned)') as segment, coalesce(c.customer_group, '(unassigned)') as segment_label"
-		pivot_groupby = "segment"
+	def remap(seg: str) -> str:
+		"""Collapse descendant group names into their selected root; no-op when scope empty."""
+		return scope_map.get(seg, seg) if scope_map else seg
 
-	# Per-pivot rollup over the current and prior period. The pivot key is either the
-	# Customer Group (default) or the Customer itself (when settings scope is set).
+	# Per-group rollup over the current and prior period.
 	def _rollup(p_from: date, p_to: date) -> dict[str, dict]:
 		rows = frappe.db.sql(
 			f"""
 			select
-				{pivot_select},
+				coalesce(c.customer_group, '(unassigned)')                                          as segment,
 				coalesce(sum({amt_expr}), 0)                                                         as revenue,
 				coalesce(sum(
 					coalesce(nullif(sii.incoming_rate, 0), dni.incoming_rate, 0) * sii.stock_qty
 				), 0)                                                                                 as cogs,
 				coalesce(sum(case when sii.incoming_rate > 0 or dni.incoming_rate > 0 then {amt_expr} else 0 end), 0) as rev_valuated,
-				count(distinct si.customer)                                                          as customers,
+				si.customer                                                                          as customer,
 				count(distinct si.name)                                                              as invoices
 			from {SII_BASE_FROM}
 			left join `tabDelivery Note Item` dni on dni.name = sii.dn_detail
 			where {SII_BASE_WHERE}
 			  {intent_clause}
 			  {scope_clause}
-			group by {pivot_groupby}
+			group by segment, si.customer
 			""",
 			{"from": p_from, "to": p_to, **scope_params},
 			as_dict=True,
 		)
-		return {r["segment"]: r for r in rows}
+		# Remap descendant-group rows to their selected root, then roll up.
+		out: dict[str, dict] = {}
+		for r in rows:
+			seg = remap(r["segment"])
+			bucket = out.setdefault(
+				seg,
+				{
+					"segment": seg,
+					"revenue": 0.0,
+					"cogs": 0.0,
+					"rev_valuated": 0.0,
+					"_customers": set(),
+					"invoices": 0,
+				},
+			)
+			bucket["revenue"] += flt(r["revenue"])
+			bucket["cogs"] += flt(r["cogs"])
+			bucket["rev_valuated"] += flt(r["rev_valuated"])
+			if r.get("customer"):
+				bucket["_customers"].add(r["customer"])
+			bucket["invoices"] += int(r["invoices"])
+		for bucket in out.values():
+			bucket["customers"] = len(bucket.pop("_customers"))
+		return out
 
 	current = _rollup(period.from_date, period.to_date)
 	prior = _rollup(period.prior_from, period.prior_to)
 
-	# Per-pivot monthly revenue. Same pivot key as the rollup.
-	monthly_pivot_key = "si.customer" if customer_pivot else "coalesce(c.customer_group, '(unassigned)')"
+	# Per-group monthly revenue (with descendant rollup).
 	monthly_rows = frappe.db.sql(
 		f"""
 		select
-			{monthly_pivot_key}                            as segment,
+			coalesce(c.customer_group, '(unassigned)')     as segment,
 			year(si.posting_date)                          as yr,
 			month(si.posting_date)                         as mo,
 			coalesce(sum({amt_expr}), 0)                   as revenue
@@ -915,84 +929,94 @@ def get_customer_segments(
 
 	monthly_per_segment: dict[str, dict[str, float]] = {}
 	for r in monthly_rows:
-		seg = r["segment"]
+		seg = remap(r["segment"])
 		key = f"{int(r['yr'])}-{int(r['mo']):02d}"
-		monthly_per_segment.setdefault(seg, {k: 0.0 for k in month_keys})
-		if key in monthly_per_segment[seg]:
-			monthly_per_segment[seg][key] = round(flt(r["revenue"]) / 1_00_000, 2)
+		bucket = monthly_per_segment.setdefault(seg, {k: 0.0 for k in month_keys})
+		if key in bucket:
+			bucket[key] = round(bucket[key] + flt(r["revenue"]) / 1_00_000, 2)
 
-	# Top customers per segment — only meaningful in group-pivot mode (each segment is
-	# already a single customer in the other mode).
-	top_customers_per_segment: dict[str, list[dict]] = {}
-	if not customer_pivot:
-		top_customers_rows = frappe.db.sql(
-			f"""
-			select
-				coalesce(c.customer_group, '(unassigned)')                              as segment,
-				si.customer                                                              as customer,
-				coalesce(c.customer_name, si.customer)                                   as customer_name,
-				coalesce(sum({amt_expr}), 0)                                             as revenue,
-				count(distinct si.name)                                                  as invoices
-			from {SII_BASE_FROM}
-			where {SII_BASE_WHERE}
-			  {intent_clause}
-			group by segment, si.customer, customer_name
-			order by revenue desc
-			""",
-			{"from": period.from_date, "to": period.to_date},
-			as_dict=True,
-		)
-		for r in top_customers_rows:
-			seg = r["segment"]
-			bucket = top_customers_per_segment.setdefault(seg, [])
-			if len(bucket) < int(top_n_customers):
-				bucket.append(
-					{
-						"customer": r["customer"],
-						"customer_name": r["customer_name"],
-						"revenue": flt(r["revenue"]),
-						"invoices": int(r["invoices"]),
-					}
-				)
-
-	# Top categories per segment (same pivot key as the rollup).
-	cat_pivot_key = "si.customer" if customer_pivot else "coalesce(c.customer_group, '(unassigned)')"
-	top_cat_rows = frappe.db.sql(
+	# Top customers per segment (rolled up into the selected root).
+	top_customers_rows = frappe.db.sql(
 		f"""
 		select
-			{cat_pivot_key}                                                          as segment,
-			coalesce(i.item_group, 'Unclassified')                                   as category,
-			count(distinct sii.item_code)                                            as sku_count,
-			coalesce(sum({amt_expr}), 0)                                             as revenue
+			coalesce(c.customer_group, '(unassigned)')                              as segment,
+			si.customer                                                              as customer,
+			coalesce(c.customer_name, si.customer)                                   as customer_name,
+			coalesce(sum({amt_expr}), 0)                                             as revenue,
+			count(distinct si.name)                                                  as invoices
 		from {SII_BASE_FROM}
 		where {SII_BASE_WHERE}
 		  {intent_clause}
 		  {scope_clause}
-		group by segment, category
+		group by segment, si.customer, customer_name
 		order by revenue desc
 		""",
 		{"from": period.from_date, "to": period.to_date, **scope_params},
 		as_dict=True,
 	)
-	top_cat_per_segment: dict[str, list[dict]] = {}
-	for r in top_cat_rows:
-		seg = r["segment"]
-		bucket = top_cat_per_segment.setdefault(seg, [])
-		if len(bucket) < int(top_n_categories):
-			bucket.append(
-				{
-					"category": r["category"],
-					"sku_count": int(r["sku_count"]),
-					"revenue": flt(r["revenue"]),
-				}
-			)
+	top_customers_per_segment: dict[str, list[dict]] = {}
+	# First aggregate per (root_segment, customer) in case the same customer is in
+	# multiple descendants (shouldn't happen, but be defensive).
+	per_seg_per_cust: dict[str, dict[str, dict]] = {}
+	for r in top_customers_rows:
+		seg = remap(r["segment"])
+		cust = r["customer"]
+		entry = per_seg_per_cust.setdefault(seg, {}).setdefault(
+			cust,
+			{
+				"customer": cust,
+				"customer_name": r["customer_name"],
+				"revenue": 0.0,
+				"invoices": 0,
+			},
+		)
+		entry["revenue"] += flt(r["revenue"])
+		entry["invoices"] += int(r["invoices"])
+	for seg, by_cust in per_seg_per_cust.items():
+		ranked = sorted(by_cust.values(), key=lambda e: e["revenue"], reverse=True)
+		top_customers_per_segment[seg] = ranked[: int(top_n_customers)]
 
-	# Assemble per-segment payload, sorted by revenue desc. "segment" is the display
-	# label (Customer Group name OR Customer name depending on pivot); the pivot key
-	# stays stable across dicts (segment_id).
+	# Top categories per segment (rolled up into the selected root).
+	top_cat_rows = frappe.db.sql(
+		f"""
+		select
+			coalesce(c.customer_group, '(unassigned)')                              as segment,
+			coalesce(i.item_group, 'Unclassified')                                   as category,
+			sii.item_code                                                            as item_code,
+			coalesce(sum({amt_expr}), 0)                                             as revenue
+		from {SII_BASE_FROM}
+		where {SII_BASE_WHERE}
+		  {intent_clause}
+		  {scope_clause}
+		group by segment, category, sii.item_code
+		""",
+		{"from": period.from_date, "to": period.to_date, **scope_params},
+		as_dict=True,
+	)
+	per_seg_per_cat: dict[str, dict[str, dict]] = {}
+	for r in top_cat_rows:
+		seg = remap(r["segment"])
+		cat = r["category"]
+		entry = per_seg_per_cat.setdefault(seg, {}).setdefault(
+			cat, {"category": cat, "sku_count": 0, "revenue": 0.0, "_skus": set()}
+		)
+		entry["revenue"] += flt(r["revenue"])
+		entry["_skus"].add(r["item_code"])
+	top_cat_per_segment: dict[str, list[dict]] = {}
+	for seg, by_cat in per_seg_per_cat.items():
+		ranked = sorted(by_cat.values(), key=lambda e: e["revenue"], reverse=True)
+		top_cat_per_segment[seg] = [
+			{
+				"category": c["category"],
+				"sku_count": len(c["_skus"]),
+				"revenue": c["revenue"],
+			}
+			for c in ranked[: int(top_n_categories)]
+		]
+
+	# Assemble per-segment payload, sorted by revenue desc.
 	segments: list[dict] = []
-	for seg_id, cur in current.items():
-		label = cur.get("segment_label") or seg_id
+	for seg, cur in current.items():
 		rev = flt(cur["revenue"])
 		rev_val = flt(cur["rev_valuated"])
 		cogs = flt(cur["cogs"])
@@ -1001,13 +1025,12 @@ def get_customer_segments(
 		coverage = (rev_val / rev * 100) if rev else 0.0
 		invoices = int(cur["invoices"])
 		customers = int(cur["customers"])
-		prev = prior.get(seg_id, {})
+		prev = prior.get(seg, {})
 		prev_rev = flt(prev.get("revenue", 0))
 		yoy = ((rev - prev_rev) / prev_rev * 100) if prev_rev else None
 		segments.append(
 			{
-				"segment": label,
-				"segment_id": seg_id,
+				"segment": seg,
 				"revenue": rev,
 				"prior_revenue": prev_rev,
 				"yoy_pct": yoy,
@@ -1018,9 +1041,9 @@ def get_customer_segments(
 				"gp": gp,
 				"gm_pct": gm_pct,
 				"gm_coverage_pct": coverage,
-				"monthly": monthly_per_segment.get(seg_id, {k: 0.0 for k in month_keys}),
-				"top_customers": top_customers_per_segment.get(seg_id, []),
-				"top_categories": top_cat_per_segment.get(seg_id, []),
+				"monthly": monthly_per_segment.get(seg, {k: 0.0 for k in month_keys}),
+				"top_customers": top_customers_per_segment.get(seg, []),
+				"top_categories": top_cat_per_segment.get(seg, []),
 			}
 		)
 	segments.sort(key=lambda s: s["revenue"], reverse=True)
@@ -1046,8 +1069,7 @@ def get_customer_segments(
 		"company": _default_company(),
 		"tax_mode": mode,
 		"intent": intent if intent in ("all", "b2c", "b2b") else "all",
-		"pivot": "customer" if customer_pivot else "group",
-		"scope_groups": allowed_groups,
+		"scope_roots": sorted({v for v in scope_map.values()}),
 		"month_keys": month_keys,
 		"segments": segments,
 		"totals": totals,

@@ -155,11 +155,9 @@ export interface CustomerSegmentsResponse {
 	company: string;
 	tax_mode: TaxMode;
 	intent: IntentFilter;
-	/** ``"group"`` when no Customer-Group scope is set (default — rows = Customer Groups).
-	 *  ``"customer"`` when settings has a scope — rows are individual Customers inside
-	 *  the scoped groups + their sub-groups, each with consolidated metrics. */
-	pivot: "group" | "customer";
-	scope_groups: string[];
+	/** Admin-selected roots from settings. Descendant Customer Groups are rolled up
+	 *  into their selected root before rendering — each root becomes one segment row. */
+	scope_roots: string[];
 	month_keys: string[];
 	segments: CustomerSegment[];
 	totals: {

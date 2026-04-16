@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { PeriodPicker } from "@/components/widgets/PeriodPicker";
 import { TaxModeTabs } from "@/components/widgets/TaxModeTabs";
+import { DownloadExcelButton } from "@/components/widgets/DownloadExcelButton";
 import { useSkuAssortment } from "@/hooks/useOverview";
 import { cn, formatINRShort, formatPct } from "@/lib/utils";
 import type { IntentFilter, PeriodSelection, SkuRow, TaxMode } from "@/types/mis";
@@ -95,7 +96,8 @@ export function AssortmentPage({
 						{res ? `${res.period.label} · ${taxLabel} · ${filtered.length} of ${res.totals.sku_count} SKUs` : "loading…"}
 					</div>
 				</div>
-				<div className="flex items-center gap-2">
+				<div className="flex items-center gap-2 flex-wrap justify-end">
+					<DownloadExcelButton taxMode={taxMode} period={period} intent={intent} />
 					<PeriodPicker value={period} onChange={onPeriodChange} />
 					<TaxModeTabs value={taxMode} onChange={onTaxModeChange} />
 				</div>
