@@ -3,7 +3,7 @@ import { KpiTile } from "@/components/widgets/KpiTile";
 import { MarginTile } from "@/components/widgets/MarginTile";
 import { RevenueTrendChart } from "@/components/widgets/RevenueTrendChart";
 import { RevenueMixChart } from "@/components/widgets/RevenueMixChart";
-import { CategoryBarChart } from "@/components/widgets/CategoryBarChart";
+import { CategoryTable } from "@/components/widgets/CategoryTable";
 import { TaxModeTabs } from "@/components/widgets/TaxModeTabs";
 import { PeriodPicker } from "@/components/widgets/PeriodPicker";
 import { useOverview } from "@/hooks/useOverview";
@@ -400,11 +400,16 @@ function OverviewBody({
 						<RevenueMixChart b2c={kpi.b2c_revenue} b2b={kpi.b2b_revenue} />
 					</div>
 					<div className="card flex-1">
-						<div className="card-title">SKUs by category</div>
+						<div className="flex items-center justify-between mb-3">
+							<div className="card-title mb-0">Revenue by category</div>
+							<span className="text-[9.5px] tracking-[0.1em] uppercase text-text-3 font-medium">
+								Top 10 + Other
+							</span>
+						</div>
 						{categories.length === 0 ? (
 							<EmptyState message="No Item Group data yet." />
 						) : (
-							<CategoryBarChart data={categories} />
+							<CategoryTable data={categories} />
 						)}
 					</div>
 				</div>
