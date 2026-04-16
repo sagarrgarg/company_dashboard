@@ -20,7 +20,6 @@ export function DownloadExcelButton({ taxMode, period, intent = "all", className
 		form.method = "POST";
 		form.action = "/api/method/company_dashboard.api.export.download_mis_workbook";
 		form.target = "_self";
-		const csrf = window.csrf_token;
 		const fields: Record<string, string> = {
 			tax_mode: taxMode,
 			intent,
@@ -29,7 +28,11 @@ export function DownloadExcelButton({ taxMode, period, intent = "all", className
 			fields.from_date = period.from;
 			fields.to_date = period.to;
 		}
-		if (csrf) fields["X-Frappe-CSRF-Token"] = csrf;
+		// Frappe accepts the CSRF token either as header X-Frappe-CSRF-Token OR as the
+		// form field literally named "csrf_token". We use the form-field path because
+		// native form submit can't set custom request headers.
+		const csrf = window.csrf_token;
+		if (csrf) fields.csrf_token = csrf;
 		for (const [key, value] of Object.entries(fields)) {
 			const input = document.createElement("input");
 			input.type = "hidden";
