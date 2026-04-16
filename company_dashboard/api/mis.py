@@ -801,15 +801,19 @@ def get_customer_segments(
 ) -> dict:
 	"""Per-Customer-Group analysis with monthly trend and customer / category drilldown.
 
-	Customer Group is ERPNext's native channel/segment field on Customer; admins seed the
-	channel buckets (GT Distribution / Modern Trade / QuickCommerce / Ecommerce /
-	Wholesale) via ``ensure_channel_customer_groups``. The page surfaces *all* groups
-	that had revenue in the period — not just the seeded set — so promoters see the
-	whole footprint. Internal customers are excluded as everywhere else.
+	Customer Group is sourced from the **Customer master** (``tabCustomer.customer_group``),
+	not the cached field on Sales Invoice. This means re-tagging a customer in ERPNext
+	immediately moves all their historical revenue into the new bucket — no need to
+	re-issue invoices. Admins seed the channel buckets (GT Distribution / Modern Trade /
+	QuickCommerce / Ecommerce / Wholesale) via ``ensure_channel_customer_groups``; the
+	page surfaces *all* groups that had revenue in the period (including ``(unassigned)``
+	for customers with no group set on the master). Internal customers are excluded as
+	everywhere else.
 
 	Output is denormalised so the frontend can render the segment tabs with no follow-up
-	calls. Heavy lift is per-group: 3 SQL passes (rollup, monthly, top-N customers and
-	categories) bounded by group count, so it stays cheap even on 50-group tenants.
+	calls. Heavy lift is per-group: 4 SQL passes (current rollup, prior rollup, monthly,
+	top-N customers and categories) bounded by group count, so it stays cheap even on
+	50-group tenants.
 	"""
 	_require_mis_access()
 	if not _erpnext_installed():
@@ -828,7 +832,7 @@ def get_customer_segments(
 		rows = frappe.db.sql(
 			f"""
 			select
-				coalesce(si.customer_group, '(unassigned)')                                          as segment,
+				coalesce(c.customer_group, '(unassigned)')                                          as segment,
 				coalesce(sum({amt_expr}), 0)                                                         as revenue,
 				coalesce(sum(
 					coalesce(nullif(sii.incoming_rate, 0), dni.incoming_rate, 0) * sii.stock_qty
@@ -853,7 +857,7 @@ def get_customer_segments(
 	monthly_rows = frappe.db.sql(
 		f"""
 		select
-			coalesce(si.customer_group, '(unassigned)')   as segment,
+			coalesce(c.customer_group, '(unassigned)')   as segment,
 			year(si.posting_date)                         as yr,
 			month(si.posting_date)                        as mo,
 			coalesce(sum({amt_expr}), 0)                  as revenue
@@ -882,7 +886,7 @@ def get_customer_segments(
 	top_customers_rows = frappe.db.sql(
 		f"""
 		select
-			coalesce(si.customer_group, '(unassigned)')                              as segment,
+			coalesce(c.customer_group, '(unassigned)')                              as segment,
 			si.customer                                                              as customer,
 			coalesce(c.customer_name, si.customer)                                   as customer_name,
 			coalesce(sum({amt_expr}), 0)                                             as revenue,
@@ -913,7 +917,7 @@ def get_customer_segments(
 	top_cat_rows = frappe.db.sql(
 		f"""
 		select
-			coalesce(si.customer_group, '(unassigned)')                              as segment,
+			coalesce(c.customer_group, '(unassigned)')                              as segment,
 			coalesce(i.item_group, 'Unclassified')                                   as category,
 			count(distinct sii.item_code)                                            as sku_count,
 			coalesce(sum({amt_expr}), 0)                                             as revenue
