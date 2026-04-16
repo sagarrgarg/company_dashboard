@@ -5,6 +5,28 @@ app_description = "Company Dashboard"
 app_email = "sagar1ratan1garg1@gmail.com"
 app_license = "mit"
 
+# ── MIS SPA wiring ──────────────────────────────────────────────────────────
+add_to_apps_screen = [
+	{
+		"name": "company_dashboard",
+		"logo": "/assets/company_dashboard/logo.png",
+		"title": "MIS",
+		"route": "/mis",
+		"has_permission": "company_dashboard.api.mis.has_mis_permission",
+	}
+]
+
+website_route_rules = [
+	{"from_route": "/mis/<path:app_path>", "to_route": "mis"},
+]
+
+boot_session = "company_dashboard.boot.boot_session"
+
+after_install = "company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings.seed_defaults"
+after_migrate = [
+	"company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings.seed_defaults"
+]
+
 # Apps
 # ------------------
 

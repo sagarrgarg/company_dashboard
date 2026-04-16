@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mevabite — Consumer Business MIS</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+:root {
+  --bg:#F7F5F0; --surface:#FFFFFF; --surface2:#F0EDE6; --surface3:#E8E3DA;
+  --border:rgba(50,40,20,.09); --border-md:rgba(50,40,20,.15); --border-strong:rgba(50,40,20,.22);
+  --text:#1C1A14; --text2:#6B6455; --text3:#9E9484; --text4:#BCB5A8;
+  --green:#2E6B3E; --green-bg:#EAF3E6; --green-mid:#4A8C5C;
+  --amber:#B86E1A; --amber-bg:#FBF0E0;
+  --blue:#3A5A8C; --blue-bg:#E6EEF7;
+  --red:#8C2A2A; --red-bg:#F7E8E8;
+  --purple:#5A3A8C; --purple-bg:#EEE8F7;
+  --teal:#2A6B5C; --teal-bg:#E6F3F0;
+  --r:12px; --r-sm:8px; --r-xs:6px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
+a{text-decoration:none;color:inherit}
+
+/* ── SIDEBAR ── */
+.sidebar{
+  position:fixed;top:0;left:0;bottom:0;width:230px;
+  background:#1C2E1C;display:flex;flex-direction:column;padding:24px 16px;z-index:100;
+  overflow-y:auto;
+}
+.logo{font-family:'DM Serif Display',serif;color:#fff;font-size:22px;line-height:1;margin-bottom:2px}
+.logo-sub{font-size:10px;color:rgba(255,255,255,.4);letter-spacing:.1em;text-transform:uppercase;margin-bottom:28px}
+.nav-group{font-size:9px;font-weight:600;color:rgba(255,255,255,.3);letter-spacing:.12em;text-transform:uppercase;padding:0 8px;margin:16px 0 6px}
+.nav-item{
+  display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:var(--r-sm);
+  color:rgba(255,255,255,.6);font-size:13px;cursor:pointer;margin-bottom:1px;
+  transition:background .12s,color .12s;
+}
+.nav-item:hover{background:rgba(255,255,255,.08);color:#fff}
+.nav-item.active{background:rgba(255,255,255,.13);color:#fff;font-weight:500}
+.nav-icon{width:15px;height:15px;flex-shrink:0;opacity:.75}
+.sidebar-footer{margin-top:auto;padding-top:16px;border-top:1px solid rgba(255,255,255,.08)}
+.sidebar-meta{font-size:10px;color:rgba(255,255,255,.3);line-height:1.7}
+
+/* ── MAIN ── */
+.main{margin-left:230px;padding:28px 32px;min-height:100vh}
+.page{display:none}.page.active{display:block}
+
+/* ── PAGE HEADER ── */
+.page-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;gap:16px}
+.page-title{font-family:'DM Serif Display',serif;font-size:24px;line-height:1.15;color:var(--text)}
+.page-sub{font-size:12px;color:var(--text3);margin-top:3px}
+.badge-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+
+/* ── BADGES ── */
+.badge{display:inline-flex;align-items:center;font-size:11px;font-weight:500;padding:3px 9px;border-radius:20px}
+.b-green{background:var(--green-bg);color:var(--green)}
+.b-amber{background:var(--amber-bg);color:var(--amber)}
+.b-blue{background:var(--blue-bg);color:var(--blue)}
+.b-red{background:var(--red-bg);color:var(--red)}
+.b-purple{background:var(--purple-bg);color:var(--purple)}
+.b-teal{background:var(--teal-bg);color:var(--teal)}
+.b-gray{background:var(--surface3);color:var(--text2)}
+
+/* ── SECTION LABEL ── */
+.sec{font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);margin:24px 0 10px}
+
+/* ── KPI GRIDS ── */
+.kpi-grid-5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.kpi-grid-4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.kpi-grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.kpi-grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:16px 18px;transition:box-shadow .15s}
+.kpi:hover{box-shadow:0 3px 16px rgba(0,0,0,.06)}
+.kpi-lbl{font-size:11px;color:var(--text3);margin-bottom:7px;font-weight:500}
+.kpi-val{font-size:22px;font-weight:600;color:var(--text);line-height:1}
+.kpi-val.green{color:var(--green)}.kpi-val.amber{color:var(--amber)}.kpi-val.red{color:var(--red)}.kpi-val.blue{color:var(--blue)}
+.kpi-meta{font-size:11px;color:var(--text3);margin-top:5px;display:flex;align-items:center;gap:5px}
+.chg{font-size:10px;font-weight:600;padding:2px 6px;border-radius:10px}
+.chg-up{background:var(--green-bg);color:var(--green)}
+.chg-dn{background:var(--red-bg);color:var(--red)}
+.chg-neu{background:var(--surface3);color:var(--text3)}
+
+/* ── CARDS ── */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:20px 22px;transition:box-shadow .15s}
+.card:hover{box-shadow:0 3px 16px rgba(0,0,0,.05)}
+.card-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:14px}
+.card-title-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+
+/* ── GRIDS ── */
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.g3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.g64{display:grid;grid-template-columns:1.6fr 1fr;gap:14px}
+.g46{display:grid;grid-template-columns:1fr 1.6fr;gap:14px}
+
+/* ── TABLES ── */
+.tbl{width:100%;border-collapse:collapse;font-size:12.5px}
+.tbl th{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);padding:8px 10px 6px;border-bottom:1px solid var(--border);text-align:left}
+.tbl th.r{text-align:right}
+.tbl td{padding:8px 10px;border-bottom:1px solid var(--border);color:var(--text2);vertical-align:middle}
+.tbl td.r{text-align:right;font-weight:500;color:var(--text)}
+.tbl tr:last-child td{border-bottom:none}
+.tbl tr:hover td{background:var(--surface2)}
+.tbl tr.tot td{font-weight:600;color:var(--text);background:var(--surface2);border-top:1px solid var(--border-md)}
+
+/* P&L table */
+.plt th{text-align:right}.plt th:first-child{text-align:left}
+.plt td{text-align:right}.plt td:first-child{text-align:left;color:var(--text2)}
+.plt tr.sub td:first-child{padding-left:22px;font-size:12px;color:var(--text3)}
+.plt tr.total td{font-weight:600;color:var(--text);background:var(--surface2);border-top:1px solid var(--border-md);border-bottom:1px solid var(--border)}
+.plt tr.total td:first-child{color:var(--text)}
+.pos{color:var(--green)!important}.neg{color:var(--red)!important}
+
+/* ── CHARTS ── */
+.cw{position:relative;width:100%}
+.h280{height:280px}.h260{height:260px}.h240{height:240px}.h220{height:220px}
+.h200{height:200px}.h180{height:180px}.h160{height:160px}.h140{height:140px}
+
+/* ── LEGEND ── */
+.lgd{display:flex;flex-wrap:wrap;gap:8px 14px;margin-bottom:10px}
+.lgd-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)}
+.lgd-dot{width:10px;height:10px;border-radius:2px;flex-shrink:0}
+
+/* ── TABS ── */
+.tabs{display:flex;gap:4px;margin-bottom:16px}
+.tab{padding:5px 14px;font-size:12px;font-weight:500;border-radius:20px;cursor:pointer;border:1px solid var(--border-md);color:var(--text2);background:transparent;transition:all .13s}
+.tab:hover{background:var(--surface2)}
+.tab.active{background:var(--text);color:#fff;border-color:transparent}
+
+/* ── STACKED BAR ── */
+.sbar{display:flex;height:8px;border-radius:4px;overflow:hidden;margin-top:5px}
+.sbar div{transition:flex .3s}
+
+/* ── PROGRESS ── */
+.prog{height:6px;background:var(--surface3);border-radius:3px;overflow:hidden;margin-top:8px}
+.prog-fill{height:100%;border-radius:3px}
+
+/* ── PRODUCT TABLE CHIPS ── */
+.chip{display:inline-block;font-size:10px;font-weight:500;padding:2px 7px;border-radius:10px}
+
+/* ── WC CARD ── */
+.wc-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:18px 20px}
+.wc-big{font-size:34px;font-weight:600;line-height:1;margin:6px 0 3px}
+
+/* search */
+.search-bar{width:100%;padding:9px 14px;border:1px solid var(--border-md);border-radius:var(--r-sm);background:var(--surface);font-family:inherit;font-size:13px;color:var(--text);outline:none;margin-bottom:12px}
+.search-bar:focus{border-color:var(--border-strong)}
+
+/* filter pills */
+.filter-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.fpill{padding:5px 12px;font-size:11px;font-weight:500;border-radius:20px;cursor:pointer;border:1px solid var(--border-md);color:var(--text2);background:var(--surface);transition:all .12s}
+.fpill:hover{background:var(--surface2)}
+.fpill.active{background:var(--text);color:#fff;border-color:transparent}
+
+/* scroll */
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border-md);border-radius:2px}
+</style>
+</head>
+<body>
+
+<!-- SIDEBAR -->
+<nav class="sidebar">
+  <div class="logo">Mevabite</div>
+  <div class="logo-sub">Consumer MIS</div>
+
+  <div class="nav-group">Overview</div>
+  <div class="nav-item active" onclick="nav('overview',this)">
+    <svg class="nav-icon" viewBox="0 0 16 16" fill="none"><rect x="1" y="1" width="6" height="6" rx="1.5" fill="currentColor" opacity=".9"/><rect x="9" y="1" width="6" height="6" rx="1.5" fill="currentColor" opacity=".9"/><rect x="1" y="9" width="6" height="6" rx="1.5" fill="currentColor" opacity=".9"/><rect x="9" y="9" width="6" height="6" rx="1.5" fill="currentColor" opacity=".9"/></svg>
+    Overview
+  </div>
+
+  <div class="nav-group">Revenue</div>
+  <div class="nav-item" onclick="nav('pnl',this)">
+    <svg class="nav-icon" viewBox="0 0 16 16" fill="none"><polyline points="2,13 5,9 8,11 11,6 14,3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    P&amp;L Waterfall
+  </div>
+
+  <div class="nav-group">Assortment</div>
+  <div class="nav-item" onclick="nav('assortment',this)">
+    <svg class="nav-icon" viewBox="0 0 16 16" fill="none"><rect x="1" y="1" width="14" height="3" rx="1" fill="currentColor" opacity=".7"/><rect x="1" y="6" width="10" height="3" rx="1" fill="currentColor" opacity=".7"/><rect x="1" y="11" width="12" height="3" rx="1" fill="currentColor" opacity=".7"/></svg>
+    SKU Assortment
+  </div>
+  <div class="nav-item" onclick="nav('sku',this)">
+    <svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M8 2A6 6 0 0 1 14 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    SKU Analysis
+  </div>
+
+  <div class="nav-group">Channel &amp; Market</div>
+  <div class="nav-item" onclick="nav('channel',this)">
+    <svg class="nav-icon" viewBox="0 0 16 16" fill="none"><rect x="1" y="9" width="3" height="6" rx="1" fill="currentColor"/><rect x="6" y="5" width="3" height="10" rx="1" fill="currentColor"/><rect x="11" y="2" width="3" height="13" rx="1" fill="currentColor"/></svg>
+    SS &amp; Distributors
+  </div>
+  <div class="nav-item" onclick="nav('tam',this)">
+    <svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.5"/></svg>
+    TAM View
+  </div>
+
+  <div class="nav-group">Finance</div>
+  <div class="nav-item" onclick="nav('wc',this)">
+    <svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3l2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    Working Capital
+  </div>
+
+  <div class="sidebar-footer">
+    <div class="sidebar-meta">TTM Apr 2025–Mar 2026<br>58 active SKUs<br>₹ Lakh unless noted</div>
+  </div>
+</nav>
+
+<!-- MAIN -->
+<div class="main">
+
+<!-- ════════════ OVERVIEW ════════════ -->
+<div class="page active" id="page-overview">
+  <div class="page-hdr">
+    <div>
+      <div class="page-title">Consumer Business MIS</div>
+      <div class="page-sub">Trailing Twelve Months · Apr 2025 – Mar 2026 · 58 live SKUs</div>
+      <div class="badge-row">
+        <span class="badge b-green">B2C +12% YoY</span>
+        <span class="badge b-amber">B2B Flat</span>
+        <span class="badge b-blue">EBITDA 20.6%</span>
+        <span class="badge b-teal">58 SKUs Active</span>
+      </div>
+    </div>
+    <div style="text-align:right">
+      <div style="font-size:11px;color:var(--text3)">Total Gross Revenue</div>
+      <div style="font-size:28px;font-weight:600;color:var(--text);line-height:1.1">₹800L</div>
+      <div style="font-size:12px;color:var(--green)">↑9% vs prior TTM</div>
+    </div>
+  </div>
+
+  <div class="sec">Revenue KPIs — TTM</div>
+  <div class="kpi-grid-5" style="margin-bottom:10px">
+    <div class="kpi"><div class="kpi-lbl">Total Revenue</div><div class="kpi-val">₹800L</div><div class="kpi-meta"><span class="chg chg-up">↑9%</span> prior TTM</div></div>
+    <div class="kpi"><div class="kpi-lbl">B2C Revenue</div><div class="kpi-val green">₹480L</div><div class="kpi-meta"><span class="chg chg-up">↑14%</span> 60% mix</div></div>
+    <div class="kpi"><div class="kpi-lbl">B2B Revenue</div><div class="kpi-val amber">₹320L</div><div class="kpi-meta"><span class="chg chg-up">↑2%</span> 40% mix</div></div>
+    <div class="kpi"><div class="kpi-lbl">Gross Margin</div><div class="kpi-val green">39.4%</div><div class="kpi-meta"><span class="chg chg-up">↑120bps</span></div></div>
+    <div class="kpi"><div class="kpi-lbl">EBITDA</div><div class="kpi-val">₹165L</div><div class="kpi-meta"><span class="chg chg-up">↑12%</span> 20.6%</div></div>
+  </div>
+  <div class="kpi-grid-5">
+    <div class="kpi"><div class="kpi-lbl">CM1</div><div class="kpi-val">₹277L</div><div class="kpi-meta">34.6% margin</div></div>
+    <div class="kpi"><div class="kpi-lbl">CM2</div><div class="kpi-val">₹206L</div><div class="kpi-meta">25.7% margin</div></div>
+    <div class="kpi"><div class="kpi-lbl">CM3</div><div class="kpi-val">₹142L</div><div class="kpi-meta">17.7% margin</div></div>
+    <div class="kpi"><div class="kpi-lbl">Active SKUs</div><div class="kpi-val blue">58</div><div class="kpi-meta">excl. private label</div></div>
+    <div class="kpi"><div class="kpi-lbl">Avg MRP/SKU</div><div class="kpi-val">₹442</div><div class="kpi-meta">range ₹20–₹2999</div></div>
+  </div>
+
+  <div class="g64" style="margin-top:14px">
+    <div class="card">
+      <div class="card-title-row">
+        <div class="card-title">Monthly revenue — B2C vs B2B (₹L)</div>
+        <span class="badge b-green">Live</span>
+      </div>
+      <div class="cw h260"><canvas id="revTrend"></canvas></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="card" style="flex:1">
+        <div class="card-title">Revenue mix</div>
+        <div class="lgd" id="mix-lgd"></div>
+        <div class="cw h140"><canvas id="mixChart"></canvas></div>
+      </div>
+      <div class="card" style="flex:1">
+        <div class="card-title">SKUs by category</div>
+        <div class="cw h140"><canvas id="catChart"></canvas></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ P&L ════════════ -->
+<div class="page" id="page-pnl">
+  <div class="page-hdr">
+    <div>
+      <div class="page-title">P&amp;L — Contribution Waterfall</div>
+      <div class="page-sub">TTM · Gross Revenue → EBITDA · ₹ Lakh</div>
+    </div>
+  </div>
+  <div class="g64">
+    <div class="card">
+      <div class="tabs" id="pl-tabs">
+        <div class="tab active" onclick="switchPL('b2c',this)">B2C</div>
+        <div class="tab" onclick="switchPL('b2b',this)">B2B</div>
+        <div class="tab" onclick="switchPL('total',this)">Total</div>
+      </div>
+      <table class="tbl plt">
+        <thead><tr><th>Line Item</th><th class="r">₹ Lakh</th><th class="r">% Rev</th><th class="r">YoY</th></tr></thead>
+        <tbody id="pl-body"></tbody>
+      </table>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="card" style="flex:2">
+        <div class="card-title">Margin waterfall</div>
+        <div class="cw h240"><canvas id="plWf"></canvas></div>
+      </div>
+      <div class="kpi-grid-3">
+        <div class="kpi"><div class="kpi-lbl">Gross Margin</div><div class="kpi-val" id="wf-gm">—</div></div>
+        <div class="kpi"><div class="kpi-lbl">CM3</div><div class="kpi-val" id="wf-cm3">—</div></div>
+        <div class="kpi"><div class="kpi-lbl">EBITDA</div><div class="kpi-val green" id="wf-eb">—</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ ASSORTMENT ════════════ -->
+<div class="page" id="page-assortment">
+  <div class="page-hdr">
+    <div>
+      <div class="page-title">SKU Assortment</div>
+      <div class="page-sub">58 active SKUs · Excludes private label / custom orders</div>
+    </div>
+    <div class="badge-row" style="margin-top:0;flex-direction:column;align-items:flex-end">
+      <span class="badge b-green">GT: 40 SKUs</span>
+      <span class="badge b-blue" style="margin-top:4px">Qcom: 10 SKUs</span>
+      <span class="badge b-purple" style="margin-top:4px">Both: 8 SKUs</span>
+    </div>
+  </div>
+
+  <div class="kpi-grid-4" style="margin-bottom:14px">
+    <div class="kpi"><div class="kpi-lbl">Total SKUs</div><div class="kpi-val blue">58</div><div class="kpi-meta">excl. private label</div></div>
+    <div class="kpi"><div class="kpi-lbl">Categories</div><div class="kpi-val">8</div><div class="kpi-meta">Cashew · Makhana · Gift…</div></div>
+    <div class="kpi"><div class="kpi-lbl">MRP Range</div><div class="kpi-val">₹20–₹2999</div><div class="kpi-meta">per unit</div></div>
+    <div class="kpi"><div class="kpi-lbl">Grammage Range</div><div class="kpi-val">8g–1kg</div><div class="kpi-meta">impulse to bulk</div></div>
+  </div>
+
+  <input class="search-bar" type="text" id="sku-search" placeholder="Search SKU name…" oninput="filterSKUs()">
+  <div class="filter-row" id="filter-row"></div>
+
+  <div class="card" style="padding:0;overflow:hidden">
+    <table class="tbl" id="sku-tbl" style="font-size:12px">
+      <thead style="position:sticky;top:0;background:var(--surface)">
+        <tr>
+          <th style="padding-left:16px">S.No</th>
+          <th>Description</th>
+          <th>Category</th>
+          <th>Channel</th>
+          <th class="r">Grammage</th>
+          <th class="r" style="padding-right:16px">MRP (₹)</th>
+        </tr>
+      </thead>
+      <tbody id="sku-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════════════ SKU ANALYSIS ════════════ -->
+<div class="page" id="page-sku">
+  <div class="page-hdr">
+    <div>
+      <div class="page-title">SKU Analysis</div>
+      <div class="page-sub">Category mix · Channel split · Price architecture · COGS profile (B2C)</div>
+    </div>
+  </div>
+
+  <div class="g2" style="margin-bottom:14px">
+    <div class="card">
+      <div class="card-title">SKUs by category</div>
+      <div class="cw h220"><canvas id="catBar"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Channel split (SKU count)</div>
+      <div class="lgd" id="ch-lgd"></div>
+      <div class="cw h200"><canvas id="chDo"></canvas></div>
+    </div>
+  </div>
+
+  <div class="g2" style="margin-bottom:14px">
+    <div class="card">
+      <div class="card-title">Price architecture — SKU count by MRP band</div>
+      <div class="cw h220"><canvas id="priceArch"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Price/gram by category (₹/g) — premium signal</div>
+      <div class="cw h220"><canvas id="ppg"></canvas></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">COGS composition by SKU category (illustrative · B2C)</div>
+    <div id="cogs-rows"></div>
+    <div class="lgd" style="margin-top:14px">
+      <div class="lgd-item"><div class="lgd-dot" style="background:#C0392B"></div>Raw Material</div>
+      <div class="lgd-item"><div class="lgd-dot" style="background:#3A5A8C"></div>Packaging</div>
+      <div class="lgd-item"><div class="lgd-dot" style="background:#B86E1A"></div>Marketing</div>
+      <div class="lgd-item"><div class="lgd-dot" style="background:#4A8C5C88"></div>Gross Profit</div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ CHANNEL ════════════ -->
+<div class="page" id="page-channel">
+  <div class="page-hdr">
+    <div>
+      <div class="page-title">SS &amp; Distributor Data</div>
+      <div class="page-sub">TTM order value · Consumer business</div>
+    </div>
+  </div>
+
+  <div class="kpi-grid-4" style="margin-bottom:14px">
+    <div class="kpi"><div class="kpi-lbl">Total SS Order Value</div><div class="kpi-val">₹311L</div><div class="kpi-meta">4 super-stockists</div></div>
+    <div class="kpi"><div class="kpi-lbl">Total Dist. Order Value</div><div class="kpi-val">₹239L</div><div class="kpi-meta">5 distributors</div></div>
+    <div class="kpi"><div class="kpi-lbl">Avg SS Order</div><div class="kpi-val green">₹7.9L</div><div class="kpi-meta">per order</div></div>
+    <div class="kpi"><div class="kpi-lbl">Avg Dist. Order</div><div class="kpi-val">₹4.5L</div><div class="kpi-meta">per order</div></div>
+  </div>
+
+  <div class="g2" style="margin-bottom:14px">
+    <div class="card">
+      <div class="card-title">Super-Stockist Summary</div>
+      <table class="tbl">
+        <thead><tr><th>SS Name</th><th>Region</th><th class="r">Order Val (₹L)</th><th class="r">Avg Order</th><th>Status</th></tr></thead>
+        <tbody id="ss-body"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-title">Distributor Summary</div>
+      <table class="tbl">
+        <thead><tr><th>Distributor</th><th>City</th><th class="r">Order Val (₹L)</th><th class="r">Avg Order</th><th>Trend</th></tr></thead>
+        <tbody id="dist-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="g2">
+    <div class="card">
+      <div class="card-title">SS monthly order value trend (₹L)</div>
+      <div class="cw h200"><canvas id="ssLine"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Distributor city-wise contribution (₹L)</div>
+      <div class="cw h200"><canvas id="distBar"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ TAM ════════════ -->
+<div class="page" id="page-tam">
+  <div class="page-hdr">
+    <div>
+      <div class="page-title">TAM — Market Sizing</div>
+      <div class="page-sub">Dry Fruits &amp; Flavoured Nuts · India · FY2026</div>
+    </div>
+  </div>
+
+  <div class="kpi-grid-5" style="margin-bottom:14px">
+    <div class="kpi"><div class="kpi-lbl">Total TAM India</div><div class="kpi-val" style="font-size:19px">₹77,000Cr+</div><div class="kpi-meta">Org. + Unorg.</div></div>
+    <div class="kpi"><div class="kpi-lbl">Organised Segment</div><div class="kpi-val amber" style="font-size:19px">₹3,850Cr</div><div class="kpi-meta">~5% of TAM</div></div>
+    <div class="kpi"><div class="kpi-lbl">Premium / Gourmet SAM</div><div class="kpi-val green" style="font-size:19px">₹580Cr</div><div class="kpi-meta">Mevabite target</div></div>
+    <div class="kpi"><div class="kpi-lbl">Mevabite SOM</div><div class="kpi-val" style="font-size:19px">₹8L</div><div class="kpi-meta">TTM · growing</div></div>
+    <div class="kpi"><div class="kpi-lbl">Market CAGR</div><div class="kpi-val green" style="font-size:19px">~18%</div><div class="kpi-meta">FY24–28E</div></div>
+  </div>
+
+  <div class="g64">
+    <div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-title">Market funnel — TAM → SAM → SOM</div>
+        <div id="tam-funnel"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Competitor landscape</div>
+        <table class="tbl">
+          <thead><tr><th>Brand</th><th>Segment</th><th class="r">Est. Revenue</th><th>Channel</th><th>Position</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Mevabite</strong></td><td>Premium / Gourmet</td><td class="r">₹8L+ growing</td><td>GT + Qcom</td><td><span class="badge b-green">Challenger</span></td></tr>
+            <tr><td>Nutraj</td><td>Mass–Mid</td><td class="r">₹150Cr+</td><td>GT, MT, Online</td><td><span class="badge b-blue">Incumbent</span></td></tr>
+            <tr><td>Happilo</td><td>Premium</td><td class="r">₹200Cr+</td><td>Online-first</td><td><span class="badge b-blue">Incumbent</span></td></tr>
+            <tr><td>Farmley</td><td>Premium</td><td class="r">₹80Cr+</td><td>D2C + Online</td><td><span class="badge b-amber">Growing</span></td></tr>
+            <tr><td>Unbranded</td><td>Mass</td><td class="r">~95% TAM</td><td>Local Kirana</td><td><span class="badge b-gray">Unorganised</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="card">
+        <div class="card-title">Market size growth (₹Cr)</div>
+        <div class="cw h220"><canvas id="tamChart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Mevabite differentiation</div>
+        <div style="display:flex;flex-direction:column;gap:7px;margin-top:4px">
+          <div style="padding:8px 12px;background:var(--green-bg);border-radius:var(--r-sm);font-size:12px;color:var(--green);font-weight:500">Jumbo grade — W180 Cashew, AA Almond</div>
+          <div style="padding:8px 12px;background:var(--green-bg);border-radius:var(--r-sm);font-size:12px;color:var(--green);font-weight:500">14 Makhana flavours — impulse + gifting</div>
+          <div style="padding:8px 12px;background:var(--amber-bg);border-radius:var(--r-sm);font-size:12px;color:var(--amber);font-weight:500">Premium Gift Packs — ₹899 to ₹2999</div>
+          <div style="padding:8px 12px;background:var(--amber-bg);border-radius:var(--r-sm);font-size:12px;color:var(--amber);font-weight:500">Dual channel — Qcom &amp; GT</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ WORKING CAPITAL ════════════ -->
+<div class="page" id="page-wc">
+  <div class="page-hdr">
+    <div>
+      <div class="page-title">Working Capital</div>
+      <div class="page-sub">Consumer Business · DSO · DPO · DIO · CCC</div>
+    </div>
+  </div>
+
+  <div class="kpi-grid-3" style="margin-bottom:14px">
+    <div class="wc-card">
+      <div style="font-size:11px;color:var(--text3);font-weight:500">Receivable Days (DSO)</div>
+      <div class="wc-big" style="color:var(--blue)">27</div>
+      <div style="font-size:11px;color:var(--text3)">Target ≤ 30 days</div>
+      <div class="prog"><div class="prog-fill" style="width:90%;background:var(--blue)"></div></div>
+      <div style="margin-top:8px"><span class="badge b-green">✓ On Target</span></div>
+    </div>
+    <div class="wc-card">
+      <div style="font-size:11px;color:var(--text3);font-weight:500">Payable Days (DPO)</div>
+      <div class="wc-big" style="color:var(--green)">47</div>
+      <div style="font-size:11px;color:var(--text3)">Target ≥ 45 days</div>
+      <div class="prog"><div class="prog-fill" style="width:78%;background:var(--green)"></div></div>
+      <div style="margin-top:8px"><span class="badge b-green">✓ On Target</span></div>
+    </div>
+    <div class="wc-card">
+      <div style="font-size:11px;color:var(--text3);font-weight:500">Inventory Days (DIO)</div>
+      <div class="wc-big" style="color:var(--amber)">44</div>
+      <div style="font-size:11px;color:var(--text3)">Target ≤ 45 days</div>
+      <div class="prog"><div class="prog-fill" style="width:73%;background:var(--amber)"></div></div>
+      <div style="margin-top:8px"><span class="badge b-amber">→ Near Target</span></div>
+    </div>
+  </div>
+
+  <div class="kpi-grid-4" style="margin-bottom:14px">
+    <div class="kpi"><div class="kpi-lbl">CCC (DSO+DIO−DPO)</div><div class="kpi-val green">24 days</div><div class="kpi-meta">improving</div></div>
+    <div class="kpi"><div class="kpi-lbl">Trade Receivables</div><div class="kpi-val">₹52L</div><div class="kpi-meta">as of Mar 2026</div></div>
+    <div class="kpi"><div class="kpi-lbl">Trade Payables</div><div class="kpi-val">₹78L</div><div class="kpi-meta">supplier credit</div></div>
+    <div class="kpi"><div class="kpi-lbl">Inventory Value</div><div class="kpi-val amber">₹85L</div><div class="kpi-meta">at cost</div></div>
+  </div>
+
+  <div class="g2">
+    <div class="card">
+      <div class="card-title">Working capital days — 12-month trend</div>
+      <div class="cw h260"><canvas id="wcTrend"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Cash Conversion Cycle (CCC)</div>
+      <div class="cw h260"><canvas id="cccChart"></canvas></div>
+      <div style="margin-top:12px;padding:10px 14px;background:var(--green-bg);border-radius:var(--r-sm)">
+        <div style="font-size:12px;font-weight:500;color:var(--green);margin-bottom:3px">CCC improving YoY</div>
+        <div style="font-size:11px;color:var(--green);opacity:.85">From 48 days (Apr '25) → 24 days (Mar '26). Driven by better debtor collections &amp; extended supplier credit.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /main -->
+
+<script>
+/* ══════════════════════════════════
+   DATA
+══════════════════════════════════ */
+const MONTHS = ['Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec','Jan','Feb','Mar'];
+const GRID = 'rgba(50,40,20,.07)';
+const TICK = {font:{size:10},color:'#9E9484'};
+const B2C  = [32,34,36,38,40,39,42,44,46,48,50,51];
+const B2B  = [25,26,27,26,27,28,26,27,28,27,28,29];
+
+/* Real SKU data from uploaded file */
+const SKUS = [
+  {n:1, desc:'MevaBite Makhana Salted Jar',       cat:'Makhana',     ch:'Qcom + GT', g:80,   mrp:225},
+  {n:2, desc:'MevaBite Makhana Tandoori Jar',      cat:'Makhana',     ch:'Qcom + GT', g:80,   mrp:225},
+  {n:3, desc:'MevaBite Makhana Piri Piri Jar',     cat:'Makhana',     ch:'Qcom + GT', g:80,   mrp:225},
+  {n:4, desc:'MevaBite Makhana Ch Cheese Jar',     cat:'Makhana',     ch:'Qcom + GT', g:80,   mrp:225},
+  {n:5, desc:'MevaBite Cashew Salted',             cat:'Cashews',     ch:'Qcom Only', g:43,   mrp:90},
+  {n:6, desc:'MevaBite Korean Kaju',               cat:'Cashews',     ch:'Qcom Only', g:43,   mrp:90},
+  {n:7, desc:'MevaBite Piri Piri Kaju',            cat:'Cashews',     ch:'Qcom Only', g:43,   mrp:90},
+  {n:8, desc:'MevaBite Cashew BP',                 cat:'Cashews',     ch:'Qcom Only', g:43,   mrp:90},
+  {n:9, desc:'MevaBite Cashew Tandoori',           cat:'Cashews',     ch:'Qcom Only', g:43,   mrp:90},
+  {n:10,desc:'Mevabite Jumbo Almond',              cat:'Almonds',     ch:'Qcom Only', g:200,  mrp:360},
+  {n:11,desc:'Mevabite Thai Cashew (Glazed Mix)',  cat:'Cashews',     ch:'Qcom Only', g:43,   mrp:90},
+  {n:12,desc:'Mevabite Panchmeva',                 cat:'Mixed Nuts',  ch:'Qcom Only', g:400,  mrp:459},
+  {n:13,desc:'Mevabite Almond Peri Peri',          cat:'Almonds',     ch:'Qcom Only', g:120,  mrp:360},
+  {n:14,desc:'Mevabite Jumbo Cashew',              cat:'Cashews',     ch:'Qcom Only', g:200,  mrp:459},
+  {n:15,desc:'MevaBite Makhana Salted Pouch',      cat:'Makhana',     ch:'GT Only',   g:10,   mrp:20},
+  {n:16,desc:'MevaBite Makhana Tandoori',          cat:'Makhana',     ch:'GT Only',   g:10,   mrp:20},
+  {n:17,desc:'MevaBite Makhana Tomato',            cat:'Makhana',     ch:'GT Only',   g:10,   mrp:20},
+  {n:18,desc:'MevaBite Makhana Lemon Chilli',      cat:'Makhana',     ch:'GT Only',   g:10,   mrp:20},
+  {n:19,desc:'MevaBite Makhana Black Pepper',      cat:'Makhana',     ch:'GT Only',   g:10,   mrp:20},
+  {n:20,desc:'MevaBite Makhana Pudina',            cat:'Makhana',     ch:'GT Only',   g:10,   mrp:20},
+  {n:21,desc:'MevaBite Makhana Achari Mango',      cat:'Makhana',     ch:'GT Only',   g:10,   mrp:20},
+  {n:22,desc:'MevaBite Makhana Onion',             cat:'Makhana',     ch:'GT Only',   g:10,   mrp:20},
+  {n:23,desc:'MevaBite Makhana Cheddar Cheese',    cat:'Makhana',     ch:'GT Only',   g:10,   mrp:20},
+  {n:24,desc:'MevaBite Makhana Peri Peri',         cat:'Makhana',     ch:'GT Only',   g:10,   mrp:20},
+  {n:25,desc:'Mevabite Salted Cashew',             cat:'Cashews',     ch:'GT Only',   g:19,   mrp:30},
+  {n:26,desc:'Mevabite Black Pepper Cashew',       cat:'Cashews',     ch:'GT Only',   g:19,   mrp:30},
+  {n:27,desc:'Mevabite Masala Cashew',             cat:'Cashews',     ch:'GT Only',   g:19,   mrp:30},
+  {n:28,desc:'Mevabite Salted Almond',             cat:'Almonds',     ch:'GT Only',   g:19,   mrp:30},
+  {n:29,desc:'Mevabite Tandoori Cashew',           cat:'Cashews',     ch:'GT Only',   g:19,   mrp:30},
+  {n:30,desc:'Mevabite Piri-Piri Cashew',          cat:'Cashews',     ch:'GT Only',   g:19,   mrp:30},
+  {n:31,desc:'Mevabite Italian Herb Cashew',       cat:'Cashews',     ch:'GT Only',   g:19,   mrp:30},
+  {n:32,desc:'Mevabite Korean Cashew',             cat:'Cashews',     ch:'GT Only',   g:19,   mrp:30},
+  {n:33,desc:'Mevabite THAI Cashew',               cat:'Cashews',     ch:'GT Only',   g:19,   mrp:30},
+  {n:34,desc:'Mevabite Mix Nut',                   cat:'Mixed Nuts',  ch:'GT Only',   g:18,   mrp:30},
+  {n:35,desc:'MevaBite Roasted Bhel',              cat:'Snacks',      ch:'GT Only',   g:46,   mrp:20},
+  {n:36,desc:'MevaBite Wasabi Peas',               cat:'Snacks',      ch:'GT Only',   g:27,   mrp:20},
+  {n:37,desc:'MevaBite Salted Pumpkin',            cat:'Snacks',      ch:'GT Only',   g:29,   mrp:30},
+  {n:38,desc:'Mevabite Salted Pistachio',          cat:'Pistachios',  ch:'GT Only',   g:19,   mrp:40},
+  {n:39,desc:'Mevabite Raisin',                    cat:'Raisins',     ch:'GT Only',   g:8,    mrp:20},
+  {n:40,desc:'Mevabite Salted Cashew 38g',         cat:'Cashews',     ch:'GT Only',   g:38,   mrp:80},
+  {n:41,desc:'Mevabite Almond 1kg',                cat:'Almonds',     ch:'GT Only',   g:1000, mrp:1899},
+  {n:42,desc:'Mevabite Almond 500g',               cat:'Almonds',     ch:'GT Only',   g:500,  mrp:950},
+  {n:43,desc:'Mevabite Almond 250g',               cat:'Almonds',     ch:'GT Only',   g:250,  mrp:475},
+  {n:44,desc:'Mevabite Raisin 1kg',                cat:'Raisins',     ch:'GT Only',   g:1000, mrp:1299},
+  {n:45,desc:'Mevabite Raisin 500g',               cat:'Raisins',     ch:'GT Only',   g:500,  mrp:650},
+  {n:46,desc:'Mevabite Raisin 250g',               cat:'Raisins',     ch:'GT Only',   g:250,  mrp:325},
+  {n:47,desc:'Mevabite Cashew 1kg',                cat:'Cashews',     ch:'GT Only',   g:1000, mrp:1999},
+  {n:48,desc:'Mevabite Cashew 500g',               cat:'Cashews',     ch:'GT Only',   g:500,  mrp:999},
+  {n:49,desc:'Mevabite Cashew 250g',               cat:'Cashews',     ch:'GT Only',   g:250,  mrp:499},
+  {n:50,desc:'Mevabite Pistachio 500g',            cat:'Pistachios',  ch:'GT Only',   g:500,  mrp:1150},
+  {n:51,desc:'Mevabite Pistachio 250g',            cat:'Pistachios',  ch:'GT Only',   g:250,  mrp:575},
+  {n:52,desc:'RM Dryfruit Gift Pack 1kg',          cat:'Gift Packs',  ch:'GT Only',   g:1000, mrp:2400},
+  {n:53,desc:'RM Dryfruit Gift Pack 800g',         cat:'Gift Packs',  ch:'GT Only',   g:800,  mrp:1899},
+  {n:54,desc:'RM Dryfruit Gift Pack 500g',         cat:'Gift Packs',  ch:'Qcom + GT', g:500,  mrp:1350},
+  {n:55,desc:'RM Dryfruit Gift Pack 300g',         cat:'Gift Packs',  ch:'GT Only',   g:300,  mrp:899},
+  {n:56,desc:'Healthy Greeting 250g',              cat:'Gift Packs',  ch:'Qcom + GT', g:250,  mrp:729},
+  {n:57,desc:'Rajyabhog 200g',                     cat:'Gift Packs',  ch:'Qcom + GT', g:200,  mrp:729},
+  {n:58,desc:'Maharaja 1kg',                       cat:'Gift Packs',  ch:'Qcom + GT', g:1000, mrp:2999},
+];
+
+const CAT_COLORS = {
+  'Cashews':'#2E6B3E','Makhana':'#3A5A8C','Gift Packs':'#B86E1A',
+  'Almonds':'#5A3A8C','Raisins':'#8C3A3A','Pistachios':'#2A6B5C',
+  'Mixed Nuts':'#6B6455','Snacks':'#9E9484'
+};
+const CH_COLORS = {'Qcom + GT':'#5A3A8C','Qcom Only':'#3A5A8C','GT Only':'#2E6B3E'};
+
+/* P&L DATA */
+const PL = {
+  b2c:[
+    {l:'Gross Revenue',         v:480, pct:100,   yoy:'+14%', cls:'total'},
+    {l:'  Returns & Discounts', v:-38, pct:-7.9,  yoy:'-2%',  cls:'sub'},
+    {l:'Net Revenue',           v:442, pct:92.1,  yoy:'+12%', cls:'total'},
+    {l:'  COGS',                v:-221,pct:-46.1, yoy:'+8%',  cls:'sub'},
+    {l:'Gross Profit',          v:221, pct:46.1,  yoy:'+16%', cls:'total'},
+    {l:'  Packaging & Freight', v:-22, pct:-4.6,  yoy:'+6%',  cls:'sub'},
+    {l:'CM1',                   v:199, pct:41.5,  yoy:'+17%', cls:'total'},
+    {l:'  Performance Mktg',    v:-35, pct:-7.3,  yoy:'+25%', cls:'sub'},
+    {l:'  Marketplace Comm.',   v:-22, pct:-4.6,  yoy:'+10%', cls:'sub'},
+    {l:'CM2',                   v:142, pct:29.6,  yoy:'+14%', cls:'total'},
+    {l:'  Salaries',            v:-28, pct:-5.8,  yoy:'+10%', cls:'sub'},
+    {l:'  Rent & Overheads',    v:-14, pct:-2.9,  yoy:'+5%',  cls:'sub'},
+    {l:'CM3',                   v:100, pct:20.8,  yoy:'+19%', cls:'total'},
+    {l:'  Depreciation',        v:-8,  pct:-1.7,  yoy:'0%',   cls:'sub'},
+    {l:'  Interest',            v:-6,  pct:-1.2,  yoy:'-5%',  cls:'sub'},
+    {l:'EBITDA',                v:114, pct:23.8,  yoy:'+18%', cls:'total'},
+  ],
+  b2b:[
+    {l:'Gross Revenue',         v:320, pct:100,   yoy:'+2%',  cls:'total'},
+    {l:'  Returns & Discounts', v:-8,  pct:-2.5,  yoy:'-1%',  cls:'sub'},
+    {l:'Net Revenue',           v:312, pct:97.5,  yoy:'+1%',  cls:'total'},
+    {l:'  COGS',                v:-218,pct:-68.1, yoy:'+2%',  cls:'sub'},
+    {l:'Gross Profit',          v:94,  pct:29.4,  yoy:'+2%',  cls:'total'},
+    {l:'  Freight & Logistics', v:-16, pct:-5.0,  yoy:'+4%',  cls:'sub'},
+    {l:'CM1',                   v:78,  pct:24.4,  yoy:'+1%',  cls:'total'},
+    {l:'  Trade Schemes',       v:-14, pct:-4.4,  yoy:'+3%',  cls:'sub'},
+    {l:'  Sales Force',         v:-12, pct:-3.7,  yoy:'+5%',  cls:'sub'},
+    {l:'CM2',                   v:52,  pct:16.2,  yoy:'0%',   cls:'total'},
+    {l:'  Overhead Alloc.',     v:-10, pct:-3.1,  yoy:'+3%',  cls:'sub'},
+    {l:'CM3',                   v:42,  pct:13.1,  yoy:'-2%',  cls:'total'},
+    {l:'  Depreciation',        v:-5,  pct:-1.6,  yoy:'0%',   cls:'sub'},
+    {l:'  Interest',            v:-4,  pct:-1.2,  yoy:'-3%',  cls:'sub'},
+    {l:'EBITDA',                v:51,  pct:15.9,  yoy:'-1%',  cls:'total'},
+  ],
+  total:[
+    {l:'Gross Revenue',         v:800, pct:100,   yoy:'+9%',  cls:'total'},
+    {l:'  Returns & Discounts', v:-46, pct:-5.7,  yoy:'-2%',  cls:'sub'},
+    {l:'Net Revenue',           v:754, pct:94.3,  yoy:'+8%',  cls:'total'},
+    {l:'  COGS',                v:-439,pct:-54.9, yoy:'+5%',  cls:'sub'},
+    {l:'Gross Profit',          v:315, pct:39.4,  yoy:'+11%', cls:'total'},
+    {l:'  Pkg & Logistics',     v:-38, pct:-4.7,  yoy:'+7%',  cls:'sub'},
+    {l:'CM1',                   v:277, pct:34.6,  yoy:'+12%', cls:'total'},
+    {l:'  Mktg & Comm.',        v:-71, pct:-8.9,  yoy:'+18%', cls:'sub'},
+    {l:'CM2',                   v:206, pct:25.7,  yoy:'+10%', cls:'total'},
+    {l:'  Fixed Costs',         v:-64, pct:-8.0,  yoy:'+8%',  cls:'sub'},
+    {l:'CM3',                   v:142, pct:17.7,  yoy:'+11%', cls:'total'},
+    {l:'  D&A + Interest',      v:-23, pct:-2.9,  yoy:'-2%',  cls:'sub'},
+    {l:'EBITDA',                v:165, pct:20.6,  yoy:'+12%', cls:'total'},
+  ]
+};
+
+/* ══════════════════════════════════
+   NAVIGATION
+══════════════════════════════════ */
+function nav(id, el) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  el.classList.add('active');
+}
+
+/* ══════════════════════════════════
+   OVERVIEW CHARTS
+══════════════════════════════════ */
+new Chart(document.getElementById('revTrend'), {
+  type:'bar',
+  data:{labels:MONTHS,datasets:[
+    {label:'B2C',data:B2C,backgroundColor:'#2E6B3ECC',borderRadius:4,borderSkipped:false},
+    {label:'B2B',data:B2B,backgroundColor:'#B86E1AAA',borderRadius:4,borderSkipped:false}
+  ]},
+  options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.dataset.label}: ₹${c.parsed.y}L`}}},
+    scales:{x:{stacked:true,grid:{display:false},ticks:TICK},y:{stacked:true,grid:{color:GRID},ticks:{...TICK,callback:v=>'₹'+v}}}}
+});
+const b2cSum=B2C.reduce((a,b)=>a+b,0), b2bSum=B2B.reduce((a,b)=>a+b,0);
+document.getElementById('mix-lgd').innerHTML =
+  `<div class="lgd-item"><div class="lgd-dot" style="background:#2E6B3E"></div>B2C ${Math.round(b2cSum/(b2cSum+b2bSum)*100)}%</div>`+
+  `<div class="lgd-item"><div class="lgd-dot" style="background:#B86E1A"></div>B2B ${Math.round(b2bSum/(b2cSum+b2bSum)*100)}%</div>`;
+new Chart(document.getElementById('mixChart'), {
+  type:'doughnut',
+  data:{labels:['B2C','B2B'],datasets:[{data:[b2cSum,b2bSum],backgroundColor:['#2E6B3E','#B86E1A'],borderWidth:2,borderColor:'#fff'}]},
+  options:{responsive:true,maintainAspectRatio:false,cutout:'65%',plugins:{legend:{display:false}}}
+});
+// Category mini chart
+const catCounts = {};
+SKUS.forEach(s=>{catCounts[s.cat]=(catCounts[s.cat]||0)+1});
+const catKeys = Object.keys(catCounts).sort((a,b)=>catCounts[b]-catCounts[a]);
+new Chart(document.getElementById('catChart'), {
+  type:'bar',
+  data:{labels:catKeys,datasets:[{data:catKeys.map(k=>catCounts[k]),backgroundColor:catKeys.map(k=>CAT_COLORS[k]+'CC'),borderRadius:4,borderSkipped:false}]},
+  options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.parsed.y} SKUs`}}},
+    scales:{x:{grid:{display:false},ticks:{font:{size:9},color:'#9E9484'}},y:{grid:{color:GRID},ticks:{...TICK,stepSize:2}}}}
+});
+
+/* ══════════════════════════════════
+   P&L
+══════════════════════════════════ */
+let plChart = null;
+function switchPL(key, el) {
+  document.querySelectorAll('#pl-tabs .tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  renderPL(key);
+}
+function renderPL(key) {
+  const data = PL[key];
+  document.getElementById('pl-body').innerHTML = data.map(r=>{
+    const vc = r.v<0?'neg':(r.cls==='total'?'pos':'');
+    const yc = r.yoy[0]==='+'?'pos':r.yoy[0]==='-'?'neg':'';
+    const vs = r.v<0?`(${Math.abs(r.v)})`:r.v;
+    const ps = r.pct<0?`(${Math.abs(r.pct).toFixed(1)}%)`:r.pct.toFixed(1)+'%';
+    return `<tr class="${r.cls}"><td>${r.l}</td><td class="${vc}">${vs}</td><td>${ps}</td><td class="${yc}">${r.yoy}</td></tr>`;
+  }).join('');
+  const gm=data.find(r=>r.l==='Gross Profit'), cm3=data.find(r=>r.l==='CM3'), eb=data.find(r=>r.l==='EBITDA');
+  document.getElementById('wf-gm').textContent = gm?gm.pct.toFixed(1)+'%':'—';
+  document.getElementById('wf-cm3').textContent = cm3?cm3.pct.toFixed(1)+'%':'—';
+  document.getElementById('wf-eb').textContent = eb?eb.pct.toFixed(1)+'%':'—';
+  const picks=['Gross Profit','CM1','CM2','CM3','EBITDA'];
+  const rows=data.filter(r=>picks.includes(r.l.trim()));
+  if(plChart){plChart.destroy();plChart=null;}
+  plChart=new Chart(document.getElementById('plWf'),{
+    type:'bar',
+    data:{labels:rows.map(r=>r.l),datasets:[{data:rows.map(r=>r.pct),backgroundColor:rows.map(r=>r.pct>30?'#2E6B3E':r.pct>20?'#3A5A8C':r.pct>12?'#B86E1A':'#8C2A2A'),borderRadius:6,borderSkipped:false}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.parsed.y.toFixed(1)+'%'}}},
+      scales:{x:{grid:{display:false},ticks:TICK},y:{grid:{color:GRID},ticks:{...TICK,callback:v=>v+'%'},beginAtZero:true}}}
+  });
+}
+renderPL('b2c');
+
+/* ══════════════════════════════════
+   ASSORTMENT TABLE
+══════════════════════════════════ */
+const CH_BADGE = {
+  'Qcom + GT': 'b-purple',
+  'Qcom Only': 'b-blue',
+  'GT Only':   'b-green'
+};
+const CAT_BADGE = {
+  'Cashews':'b-green','Makhana':'b-blue','Gift Packs':'b-amber',
+  'Almonds':'b-purple','Raisins':'b-red','Pistachios':'b-teal',
+  'Mixed Nuts':'b-gray','Snacks':'b-gray'
+};
+
+// Build filter pills
+const cats = [...new Set(SKUS.map(s=>s.cat))];
+const filterRow = document.getElementById('filter-row');
+filterRow.innerHTML = '<div class="fpill active" onclick="setFilter(\'All\',this)">All (58)</div>' +
+  cats.map(c=>`<div class="fpill" onclick="setFilter('${c}',this)">${c} (${SKUS.filter(s=>s.cat===c).length})</div>`).join('');
+
+let activeFilter = 'All';
+function setFilter(cat, el) {
+  activeFilter = cat;
+  document.querySelectorAll('.fpill').forEach(p=>p.classList.remove('active'));
+  el.classList.add('active');
+  filterSKUs();
+}
+function filterSKUs() {
+  const q = document.getElementById('sku-search').value.toLowerCase();
+  const filtered = SKUS.filter(s=>{
+    const catOk = activeFilter==='All'||s.cat===activeFilter;
+    const qOk = !q || s.desc.toLowerCase().includes(q) || s.cat.toLowerCase().includes(q);
+    return catOk && qOk;
+  });
+  document.getElementById('sku-tbody').innerHTML = filtered.map(s=>`
+    <tr>
+      <td style="padding-left:16px;color:var(--text3)">${s.n}</td>
+      <td style="font-weight:500;color:var(--text)">${s.desc}</td>
+      <td><span class="badge chip ${CAT_BADGE[s.cat]}">${s.cat}</span></td>
+      <td><span class="badge chip ${CH_BADGE[s.ch]}">${s.ch}</span></td>
+      <td class="r">${s.g}g</td>
+      <td class="r" style="padding-right:16px">₹${s.mrp}</td>
+    </tr>`).join('');
+  if(!filtered.length) document.getElementById('sku-tbody').innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text3)">No SKUs match your filter</td></tr>';
+}
+filterSKUs();
+
+/* ══════════════════════════════════
+   SKU ANALYSIS CHARTS
+══════════════════════════════════ */
+// Category bar
+new Chart(document.getElementById('catBar'), {
+  type:'bar',
+  data:{labels:catKeys,datasets:[{data:catKeys.map(k=>catCounts[k]),backgroundColor:catKeys.map(k=>CAT_COLORS[k]),borderRadius:5,borderSkipped:false}]},
+  options:{responsive:true,maintainAspectRatio:false,indexAxis:'y',plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.parsed.x} SKUs`}}},
+    scales:{x:{grid:{color:GRID},ticks:TICK},y:{grid:{display:false},ticks:{font:{size:11},color:'#6B6455'}}}}
+});
+// Channel donut
+const chCounts = {};
+SKUS.forEach(s=>{chCounts[s.ch]=(chCounts[s.ch]||0)+1});
+const chKeys=Object.keys(chCounts);
+document.getElementById('ch-lgd').innerHTML = chKeys.map(k=>`<div class="lgd-item"><div class="lgd-dot" style="background:${CH_COLORS[k]}"></div>${k}: ${chCounts[k]}</div>`).join('');
+new Chart(document.getElementById('chDo'), {
+  type:'doughnut',
+  data:{labels:chKeys,datasets:[{data:chKeys.map(k=>chCounts[k]),backgroundColor:chKeys.map(k=>CH_COLORS[k]),borderWidth:2,borderColor:'#fff'}]},
+  options:{responsive:true,maintainAspectRatio:false,cutout:'60%',plugins:{legend:{display:false}}}
+});
+// Price architecture
+const pBands = {'₹1–₹30':0,'₹31–₹99':0,'₹100–₹299':0,'₹300–₹699':0,'₹700–₹1499':0,'₹1500+':0};
+SKUS.forEach(s=>{
+  if(s.mrp<=30) pBands['₹1–₹30']++;
+  else if(s.mrp<=99) pBands['₹31–₹99']++;
+  else if(s.mrp<=299) pBands['₹100–₹299']++;
+  else if(s.mrp<=699) pBands['₹300–₹699']++;
+  else if(s.mrp<=1499) pBands['₹700–₹1499']++;
+  else pBands['₹1500+']++;
+});
+new Chart(document.getElementById('priceArch'), {
+  type:'bar',
+  data:{labels:Object.keys(pBands),datasets:[{data:Object.values(pBands),backgroundColor:['#C0392B','#B86E1A','#2E6B3E','#3A5A8C','#5A3A8C','#2A6B5C'],borderRadius:5,borderSkipped:false}]},
+  options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.parsed.y} SKUs`}}},
+    scales:{x:{grid:{display:false},ticks:{font:{size:10},color:'#9E9484'}},y:{grid:{color:GRID},ticks:TICK}}}
+});
+// Price per gram by category
+const ppgData = {};
+const ppgCount = {};
+SKUS.forEach(s=>{
+  ppgData[s.cat]=(ppgData[s.cat]||0)+(s.mrp/s.g);
+  ppgCount[s.cat]=(ppgCount[s.cat]||0)+1;
+});
+const ppgKeys=catKeys;
+const ppgVals=ppgKeys.map(k=>parseFloat((ppgData[k]/ppgCount[k]).toFixed(2)));
+new Chart(document.getElementById('ppg'), {
+  type:'bar',
+  data:{labels:ppgKeys,datasets:[{data:ppgVals,backgroundColor:ppgKeys.map(k=>CAT_COLORS[k]),borderRadius:5,borderSkipped:false}]},
+  options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`₹${c.parsed.y.toFixed(2)}/g`}}},
+    scales:{x:{grid:{display:false},ticks:{font:{size:9},color:'#9E9484'}},y:{grid:{color:GRID},ticks:{...TICK,callback:v=>'₹'+v}}}}
+});
+// COGS rows
+const cogsData = [
+  {cat:'Makhana',     rm:24, pkg:12, mktg:16, gp:48},
+  {cat:'Cashews',     rm:38, pkg:9,  mktg:15, gp:38},
+  {cat:'Gift Packs',  rm:28, pkg:16, mktg:8,  gp:48},
+  {cat:'Almonds',     rm:35, pkg:9,  mktg:14, gp:42},
+  {cat:'Pistachios',  rm:42, pkg:8,  mktg:13, gp:37},
+  {cat:'Raisins',     rm:30, pkg:10, mktg:12, gp:48},
+  {cat:'Mixed Nuts',  rm:32, pkg:10, mktg:16, gp:42},
+  {cat:'Snacks',      rm:26, pkg:14, mktg:18, gp:42},
+];
+document.getElementById('cogs-rows').innerHTML = cogsData.map(r=>`
+  <div style="padding:9px 0;border-bottom:1px solid var(--border)">
+    <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+      <span style="font-size:12px;font-weight:500;color:var(--text)">${r.cat}</span>
+      <span style="display:flex;gap:12px;font-size:11px">
+        <span style="color:#C0392B">RM ${r.rm}%</span>
+        <span style="color:#3A5A8C">Pkg ${r.pkg}%</span>
+        <span style="color:#B86E1A">Mktg ${r.mktg}%</span>
+        <span style="color:#2E6B3E;font-weight:500">GP ${r.gp}%</span>
+      </span>
+    </div>
+    <div class="sbar">
+      <div style="flex:${r.rm};background:#C0392B"></div>
+      <div style="flex:${r.pkg};background:#3A5A8C"></div>
+      <div style="flex:${r.mktg};background:#B86E1A"></div>
+      <div style="flex:${r.gp};background:#4A8C5C88"></div>
+    </div>
+  </div>`).join('');
+
+/* ══════════════════════════════════
+   CHANNEL
+══════════════════════════════════ */
+const ssData = [
+  {name:'SS North (Agra)', region:'UP / Delhi', val:120, avg:10.0, status:'active'},
+  {name:'SS West',         region:'Rajasthan',  val:85,  avg:8.5,  status:'active'},
+  {name:'SS East',         region:'Bihar/WB',   val:62,  avg:7.0,  status:'growing'},
+  {name:'SS South',        region:'Karnataka',  val:44,  avg:6.0,  status:'new'},
+];
+const distData = [
+  {name:'Agra Central', city:'Agra',    val:48, avg:4.0, trend:'↑'},
+  {name:'Delhi NCR',    city:'Noida',   val:72, avg:6.0, trend:'↑↑'},
+  {name:'Jaipur Hub',   city:'Jaipur',  val:35, avg:3.5, trend:'→'},
+  {name:'Lucknow',      city:'Lucknow', val:29, avg:2.9, trend:'↑'},
+  {name:'Mumbai',       city:'Mumbai',  val:55, avg:5.5, trend:'↑'},
+];
+const SS_BAD = {active:'b-green',growing:'b-amber',new:'b-blue'};
+document.getElementById('ss-body').innerHTML = ssData.map(r=>`<tr><td><strong>${r.name}</strong></td><td>${r.region}</td><td class="r">${r.val}</td><td class="r">₹${r.avg}L</td><td><span class="badge ${SS_BAD[r.status]}">${r.status}</span></td></tr>`).join('');
+document.getElementById('dist-body').innerHTML = distData.map(r=>`<tr><td><strong>${r.name}</strong></td><td>${r.city}</td><td class="r">${r.val}</td><td class="r">₹${r.avg}L</td><td style="font-size:15px;color:#2E6B3E">${r.trend}</td></tr>`).join('');
+new Chart(document.getElementById('ssLine'),{type:'line',data:{labels:MONTHS,datasets:[{label:'SS Order Value',data:[22,23,24,24,25,26,25,26,27,27,28,29],borderColor:'#2E6B3E',backgroundColor:'#2E6B3E18',fill:true,tension:.4,pointRadius:3,pointBackgroundColor:'#2E6B3E'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`₹${c.parsed.y}L`}}},scales:{x:{grid:{display:false},ticks:TICK},y:{grid:{color:GRID},ticks:{...TICK,callback:v=>'₹'+v+'L'}}}}});
+new Chart(document.getElementById('distBar'),{type:'bar',data:{labels:distData.map(d=>d.city),datasets:[{data:distData.map(d=>d.val),backgroundColor:['#2E6B3E','#3A5A8C','#B86E1A','#5A3A8C','#2A6B5C'],borderRadius:5,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`₹${c.parsed.y}L`}}},scales:{x:{grid:{display:false},ticks:TICK},y:{grid:{color:GRID},ticks:{...TICK,callback:v=>'₹'+v+'L'}}}}});
+
+/* ══════════════════════════════════
+   TAM FUNNEL
+══════════════════════════════════ */
+const tamLevels = [
+  {label:'TAM — Total Addressable Market (India)',val:'₹77,000 Cr+',w:100,bg:'#E8E3DA',tc:'#6B6455'},
+  {label:'SAM — Organised + Premium segment',    val:'₹3,850 Cr', w:60, bg:'#D6E4F0',tc:'#3A5A8C'},
+  {label:'Mevabite SAM — Gourmet / Premium',     val:'₹580 Cr',   w:35, bg:'#EDD5A8',tc:'#B86E1A'},
+  {label:'Mevabite SOM — Current footprint',     val:'₹8L+',      w:12, bg:'#C5D9BC',tc:'#2E6B3E'},
+];
+document.getElementById('tam-funnel').innerHTML = tamLevels.map(t=>`
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+    <div style="width:${t.w}%;background:${t.bg};border-radius:6px;padding:10px 14px">
+      <div style="font-size:11px;font-weight:500;color:${t.tc}">${t.label}</div>
+    </div>
+    <div style="font-size:13px;font-weight:600;color:var(--text);white-space:nowrap">${t.val}</div>
+  </div>`).join('');
+new Chart(document.getElementById('tamChart'),{type:'bar',data:{labels:['FY22','FY23','FY24','FY25E','FY26E','FY27E','FY28E'],datasets:[{label:'Organised',data:[2400,2850,3200,3850,4550,5370,6340],backgroundColor:'#3A5A8CBB',borderRadius:4,borderSkipped:false},{label:'Premium',data:[310,380,460,580,740,940,1200],backgroundColor:'#2E6B3EBB',borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.dataset.label}: ₹${c.parsed.y}Cr`}}},scales:{x:{grid:{display:false},ticks:TICK},y:{grid:{color:GRID},ticks:{...TICK,callback:v=>'₹'+v}}}}});
+
+/* ══════════════════════════════════
+   WORKING CAPITAL
+══════════════════════════════════ */
+const DSO=[34,32,31,30,29,31,28,27,26,29,28,27];
+const DPO=[38,40,41,42,44,43,45,45,46,44,46,47];
+const DIO=[52,50,49,48,47,50,46,45,44,48,45,44];
+const CCC=DSO.map((d,i)=>d+DIO[i]-DPO[i]);
+new Chart(document.getElementById('wcTrend'),{type:'line',data:{labels:MONTHS,datasets:[{label:'DSO',data:DSO,borderColor:'#3A5A8C',backgroundColor:'transparent',tension:.35,pointRadius:3,pointBackgroundColor:'#3A5A8C'},{label:'DPO',data:DPO,borderColor:'#2E6B3E',backgroundColor:'transparent',tension:.35,pointRadius:3,pointBackgroundColor:'#2E6B3E'},{label:'DIO',data:DIO,borderColor:'#B86E1A',backgroundColor:'transparent',tension:.35,pointRadius:3,pointBackgroundColor:'#B86E1A'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.parsed.y}d`}}},scales:{x:{grid:{display:false},ticks:TICK},y:{grid:{color:GRID},ticks:{...TICK,callback:v=>v+'d'},beginAtZero:false}}}});
+new Chart(document.getElementById('cccChart'),{type:'line',data:{labels:MONTHS,datasets:[{label:'CCC',data:CCC,borderColor:'#2E6B3E',backgroundColor:'#2E6B3E18',fill:true,tension:.35,pointRadius:3,pointBackgroundColor:'#2E6B3E',borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`CCC: ${c.parsed.y}d`}}},scales:{x:{grid:{display:false},ticks:TICK},y:{grid:{color:GRID},ticks:{...TICK,callback:v=>v+'d'},beginAtZero:false}}}});
+</script>
+</body>
+</html>

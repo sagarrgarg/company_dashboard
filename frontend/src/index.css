@@ -1,0 +1,125 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+	/* Surface tokens — warm beige canvas, bright card */
+	--bg: #f4f1e8;
+	--surface: #ffffff;
+	--surface2: #ebe6d9;
+	--surface3: #ded7c5;
+
+	/* Borders — slightly stronger than before for crisper card edges */
+	--border: rgba(40, 30, 15, 0.12);
+	--border-md: rgba(40, 30, 15, 0.18);
+	--border-strong: rgba(40, 30, 15, 0.28);
+
+	/* Text scale — WCAG-AA on white/cream.
+	   text on white:  text=15.5:1 · text2=7.9:1 · text3=5.0:1 · text4=3.3:1 (labels only) */
+	--text: #1a1810;
+	--text2: #574f3e;
+	--text3: #7a6f5d;
+	--text4: #9e9382;
+
+	/* Semantic colours — rebalanced for ~AA on both white and tile backgrounds */
+	--green: #1f5f33; /* 8.9:1 on white */
+	--green-bg: #dfeed9;
+	--green-mid: #3e7f52;
+	--amber: #96560f; /* 6.3:1 on white */
+	--amber-bg: #f8e7c9;
+	--blue: #2c4e80; /* 8.3:1 on white */
+	--blue-bg: #dae5f1;
+	--red: #7a1f1f; /* 9.8:1 on white */
+	--red-bg: #f4dcdc;
+	--purple: #4a2f7a; /* 9.1:1 on white */
+	--purple-bg: #e6dcf2;
+	--teal: #1d5e51; /* 8.7:1 on white */
+	--teal-bg: #d7ece6;
+
+	/* Focus ring — used on all interactive tiles / tabs */
+	--focus: #1f5f33;
+}
+
+html,
+body,
+#root {
+	height: 100%;
+}
+
+body {
+	font-family: "DM Sans", system-ui, sans-serif;
+	background: var(--bg);
+	color: var(--text);
+	font-size: 14px;
+	line-height: 1.5;
+	-webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+	width: 4px;
+	height: 4px;
+}
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+::-webkit-scrollbar-thumb {
+	background: var(--border-md);
+	border-radius: 2px;
+}
+
+@layer components {
+	.card {
+		@apply bg-surface border border-border rounded-[12px] p-5;
+		box-shadow:
+			0 1px 0 rgba(40, 30, 15, 0.04),
+			0 1px 2px rgba(40, 30, 15, 0.04);
+		transition: box-shadow 0.15s ease, transform 0.15s ease;
+	}
+	.card:hover {
+		box-shadow:
+			0 1px 0 rgba(40, 30, 15, 0.06),
+			0 6px 20px rgba(40, 30, 15, 0.07);
+	}
+	.card-title {
+		@apply text-[13px] font-semibold text-text mb-3.5 tracking-tight;
+	}
+	.kpi {
+		@apply bg-surface border border-border rounded-[12px] px-[18px] py-4;
+		box-shadow:
+			0 1px 0 rgba(40, 30, 15, 0.04),
+			0 1px 2px rgba(40, 30, 15, 0.04);
+		transition: box-shadow 0.15s ease, transform 0.15s ease;
+	}
+	.kpi:hover {
+		box-shadow:
+			0 1px 0 rgba(40, 30, 15, 0.06),
+			0 6px 20px rgba(40, 30, 15, 0.07);
+	}
+	.kpi-lbl {
+		@apply text-[10.5px] font-semibold tracking-[0.08em] uppercase text-text-3 mb-[8px];
+	}
+	.kpi-val {
+		@apply text-[24px] font-semibold text-text leading-[1.05] tracking-tight tabular-nums;
+	}
+	.kpi-meta {
+		@apply text-[11px] text-text-2 mt-[6px] flex items-center gap-[6px];
+	}
+	.badge {
+		@apply inline-flex items-center text-[11px] font-medium px-2.5 py-[3px] rounded-full;
+	}
+	.sec-label {
+		@apply text-[10px] font-semibold tracking-[0.12em] uppercase text-text-3 my-6 mt-0 mb-2.5;
+	}
+	.chg {
+		@apply text-[10px] font-semibold px-1.5 py-[2px] rounded-[10px] tabular-nums;
+	}
+
+	/* Consistent focus ring for all interactive elements */
+	button:focus-visible,
+	a:focus-visible,
+	[role="tab"]:focus-visible {
+		outline: 2px solid var(--focus);
+		outline-offset: 2px;
+		border-radius: 6px;
+	}
+}

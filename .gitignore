@@ -5,3 +5,11 @@
 tags
 node_modules
 __pycache__
+
+# local dev artefacts — not part of the app
+.claude/
+graphify-out/
+*.log
+frontend/dist/
+.env
+.env.local

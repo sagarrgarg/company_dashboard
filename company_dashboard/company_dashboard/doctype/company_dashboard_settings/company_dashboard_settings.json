@@ -1,0 +1,199 @@
+{
+ "actions": [],
+ "creation": "2026-04-16 00:00:00",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "intro_section",
+  "intro_html",
+  "cm2_section",
+  "outbound_freight_accounts",
+  "packaging_overhead_accounts",
+  "column_break_cm2",
+  "marketplace_commission_accounts",
+  "trade_scheme_accounts",
+  "cm3_section",
+  "marketing_accounts",
+  "ebitda_section",
+  "salary_accounts",
+  "rent_accounts",
+  "column_break_ebitda",
+  "utility_accounts",
+  "admin_overhead_accounts",
+  "ebit_pat_section",
+  "depreciation_amortization_accounts",
+  "interest_and_finance_accounts",
+  "column_break_pat",
+  "tax_expense_accounts",
+  "notes_section",
+  "notes"
+ ],
+ "fields": [
+  {
+   "fieldname": "intro_section",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "intro_html",
+   "fieldtype": "HTML",
+   "options": "<div style='padding:12px 14px;background:#f7f5f0;border-left:3px solid #1f5f33;border-radius:4px;font-size:13px;line-height:1.6;color:#574f3e'><b>P&amp;L framework — MIS Overview waterfall:</b><br><b>CM1 = Gross Margin</b> = (Revenue − COGS) / Revenue — no config, derived from Sales Invoice × incoming_rate.<br><b>CM2 = CM1 − Variable fulfillment</b> (freight, packaging, transaction fees, schemes).<br><b>CM3 = CM2 − Marketing</b> (online + offline).<br><b>EBITDA = CM3 − Fixed operating overhead</b> (salary, rent, utilities, admin).<br><b>EBIT = EBITDA − Depreciation & Amortization.</b><br><b>PAT = EBIT − Interest & Finance − Income Tax Expense.</b><br>Each account multiselect below maps 1:1 to a line in that waterfall.</div>"
+  },
+  {
+   "fieldname": "cm2_section",
+   "fieldtype": "Section Break",
+   "label": "CM2 — Variable fulfillment (before marketing)"
+  },
+  {
+   "description": "GL accounts for outbound shipping / courier / delivery cost. Deducted from Gross Margin (CM1) to derive CM2.",
+   "fieldname": "outbound_freight_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Outbound Freight & Shipping (CM2)",
+   "options": "Company Dashboard Account Link"
+  },
+  {
+   "description": "GL accounts for secondary / dispatch-side packaging (cartons, tape, cylinders). Primary packaging already inside COGS via BOM should NOT be listed here.",
+   "fieldname": "packaging_overhead_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Packaging & Dispatch (CM2)",
+   "options": "Company Dashboard Account Link"
+  },
+  {
+   "fieldname": "column_break_cm2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Payment gateway fees, marketplace commissions, referral fees (Amazon, Flipkart, Meesho, PayU, Razorpay, etc.).",
+   "fieldname": "marketplace_commission_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Transaction Fees & Marketplace Commissions (CM2)",
+   "options": "Company Dashboard Account Link"
+  },
+  {
+   "description": "Trade schemes, rebates, distributor incentives, off-invoice discounts — only if NOT already netted out of Sales Invoice base_net_amount.",
+   "fieldname": "trade_scheme_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Trade Schemes & Rebates (CM2)",
+   "options": "Company Dashboard Account Link"
+  },
+  {
+   "fieldname": "cm3_section",
+   "fieldtype": "Section Break",
+   "label": "CM3 — Marketing"
+  },
+  {
+   "description": "All marketing spend — performance marketing, brand advertising, influencer, trade marketing, promotions. Deducted from CM2 to derive CM3.",
+   "fieldname": "marketing_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Marketing Spend — online + offline (CM3)",
+   "options": "Company Dashboard Account Link"
+  },
+  {
+   "fieldname": "ebitda_section",
+   "fieldtype": "Section Break",
+   "label": "EBITDA — Operating overhead (post-CM3, future)"
+  },
+  {
+   "description": "Payroll — salary, director's pay, bonuses, EPF/ESIC, gratuity, staff welfare. Feeds the future EBITDA tile, NOT CM3.",
+   "fieldname": "salary_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Salary & Payroll",
+   "options": "Company Dashboard Account Link"
+  },
+  {
+   "description": "Rent and lease — office, warehouse, equipment.",
+   "fieldname": "rent_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Rent & Lease",
+   "options": "Company Dashboard Account Link"
+  },
+  {
+   "fieldname": "column_break_ebitda",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Electricity, power, water, internet, telephone, mobile — utilities and communications.",
+   "fieldname": "utility_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Utilities & Communications",
+   "options": "Company Dashboard Account Link"
+  },
+  {
+   "description": "Legal, professional, audit, insurance, bank charges, travel, repairs, office supplies, software, subscriptions.",
+   "fieldname": "admin_overhead_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Admin & General Overhead",
+   "options": "Company Dashboard Account Link"
+  },
+  {
+   "fieldname": "ebit_pat_section",
+   "fieldtype": "Section Break",
+   "label": "EBIT / PAT — Below-the-line"
+  },
+  {
+   "description": "Depreciation and amortization expense accounts. Deducted from EBITDA to derive EBIT.",
+   "fieldname": "depreciation_amortization_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Depreciation & Amortization (EBIT)",
+   "options": "Company Dashboard Account Link"
+  },
+  {
+   "description": "Interest expense on loans, finance costs, late-payment interest, loan processing fees. Deducted from EBIT to derive Profit Before Tax (PBT).",
+   "fieldname": "interest_and_finance_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Interest & Finance Cost (PBT)",
+   "options": "Company Dashboard Account Link"
+  },
+  {
+   "fieldname": "column_break_pat",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Income tax expense, deferred tax, current-year tax provision hits. Deducted from PBT to derive PAT (Profit After Tax). Use the Expense-side accounts only — Provision-liability accruals aren't supported here.",
+   "fieldname": "tax_expense_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Income Tax Expense (PAT)",
+   "options": "Company Dashboard Account Link"
+  },
+  {
+   "fieldname": "notes_section",
+   "fieldtype": "Section Break",
+   "label": "Notes"
+  },
+  {
+   "description": "Free-form notes visible to MIS admins. Not shown on the dashboard.",
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Admin Notes"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-04-16 00:00:00",
+ "modified_by": "Administrator",
+ "module": "Company Dashboard",
+ "name": "Company Dashboard Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Accounts Manager"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
