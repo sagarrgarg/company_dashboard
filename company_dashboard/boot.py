@@ -1,14 +1,19 @@
 import frappe
 
+from company_dashboard.api.mis import MIS_ACCESS_ROLES, WC_ACCESS_ROLES
+
 
 def boot_session(bootinfo):
-	"""Attach MIS-specific fields to the session boot payload.
-
-	The web controller for ``/mis`` serialises ``bootinfo`` into the HTML template so the
-	SPA can read ``window.frappe.boot`` without an extra round trip.
-	"""
+	"""Attach dashboard-specific fields to the session boot payload."""
+	user = frappe.session.user
+	roles = set(frappe.get_roles(user))
+	is_admin = user == "Administrator"
 	bootinfo["company_dashboard"] = {
 		"default_company": frappe.defaults.get_global_default("company"),
 		"has_erpnext": "erpnext" in frappe.get_installed_apps(),
-		"user_roles": frappe.get_roles(frappe.session.user),
+		"user_roles": list(roles),
+		"sections": {
+			"mis": is_admin or bool(roles & MIS_ACCESS_ROLES),
+			"wc": is_admin or bool(roles & WC_ACCESS_ROLES),
+		},
 	}

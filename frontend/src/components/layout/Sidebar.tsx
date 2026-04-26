@@ -1,11 +1,13 @@
 import { NavLink } from "react-router-dom";
 import { cn } from "@/lib/utils";
+import type { DashboardSections } from "@/App";
 
 interface NavItem {
 	to: string;
 	label: string;
 	icon: React.ReactNode;
 	group: string;
+	section: "mis" | "wc";
 	disabled?: boolean;
 }
 
@@ -18,7 +20,8 @@ const ICON = (path: React.ReactNode) => (
 const ITEMS: NavItem[] = [
 	{
 		group: "Overview",
-		to: "/",
+		section: "mis",
+		to: "/mis",
 		label: "Overview",
 		icon: ICON(
 			<>
@@ -31,7 +34,8 @@ const ITEMS: NavItem[] = [
 	},
 	{
 		group: "Revenue",
-		to: "/pnl",
+		section: "mis",
+		to: "/mis/pnl",
 		label: "P&L Waterfall",
 		icon: ICON(
 			<polyline
@@ -45,7 +49,8 @@ const ITEMS: NavItem[] = [
 	},
 	{
 		group: "Assortment",
-		to: "/assortment",
+		section: "mis",
+		to: "/mis/assortment",
 		label: "SKU Assortment",
 		icon: ICON(
 			<>
@@ -57,7 +62,8 @@ const ITEMS: NavItem[] = [
 	},
 	{
 		group: "Assortment",
-		to: "/sku",
+		section: "mis",
+		to: "/mis/sku",
 		label: "SKU Analysis",
 		disabled: true,
 		icon: ICON(
@@ -69,7 +75,8 @@ const ITEMS: NavItem[] = [
 	},
 	{
 		group: "Channel & Market",
-		to: "/segments",
+		section: "mis",
+		to: "/mis/segments",
 		label: "Customer Segments",
 		icon: ICON(
 			<>
@@ -94,7 +101,8 @@ const ITEMS: NavItem[] = [
 	},
 	{
 		group: "Channel & Market",
-		to: "/tam",
+		section: "mis",
+		to: "/mis/tam",
 		label: "TAM View",
 		disabled: true,
 		icon: ICON(
@@ -106,9 +114,9 @@ const ITEMS: NavItem[] = [
 	},
 	{
 		group: "Finance",
+		section: "wc",
 		to: "/wc",
 		label: "Working Capital",
-		disabled: true,
 		icon: ICON(
 			<>
 				<circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" />
@@ -123,9 +131,16 @@ const ITEMS: NavItem[] = [
 	},
 ];
 
-export function Sidebar({ company, period }: { company?: string; period?: string }) {
-	const brand = company?.trim() || "Company MIS";
-	const groups = ITEMS.reduce<Record<string, NavItem[]>>((acc, it) => {
+interface SidebarProps {
+	company?: string;
+	period?: string;
+	sections: DashboardSections;
+}
+
+export function Sidebar({ company, period, sections }: SidebarProps) {
+	const brand = company?.trim() || "Biz Dashboard";
+	const visible = ITEMS.filter((it) => sections[it.section]);
+	const groups = visible.reduce<Record<string, NavItem[]>>((acc, it) => {
 		(acc[it.group] ??= []).push(it);
 		return acc;
 	}, {});
@@ -138,7 +153,7 @@ export function Sidebar({ company, period }: { company?: string; period?: string
 				{brand}
 			</div>
 			<div className="text-[10px] tracking-[0.14em] uppercase text-white/55 mb-7 font-medium">
-				Consumer MIS
+				Biz Dashboard
 			</div>
 
 			{Object.entries(groups).map(([group, items]) => (
@@ -150,7 +165,7 @@ export function Sidebar({ company, period }: { company?: string; period?: string
 						<NavLink
 							key={it.to}
 							to={it.to}
-							end={it.to === "/"}
+							end={it.to === "/mis"}
 							className={({ isActive }) =>
 								cn(
 									"flex items-center gap-2.5 px-2.5 py-[7px] rounded-lg text-[13px] mb-[1px] transition-colors",

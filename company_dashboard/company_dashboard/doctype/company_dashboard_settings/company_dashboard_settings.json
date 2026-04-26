@@ -28,6 +28,10 @@
   "interest_and_finance_accounts",
   "column_break_pat",
   "tax_expense_accounts",
+  "wc_section",
+  "wc_exclude_customer_groups",
+  "column_break_wc",
+  "wc_exclude_supplier_groups",
   "notes_section",
   "notes"
  ],
@@ -170,6 +174,29 @@
    "options": "Company Dashboard Account Link"
   },
   {
+   "fieldname": "wc_section",
+   "fieldtype": "Section Break",
+   "label": "Working Capital — Exclusions"
+  },
+  {
+   "description": "Customer Groups to exclude from Trade Receivable in Working Capital dashboard. Internal/intercompany groups typically go here.",
+   "fieldname": "wc_exclude_customer_groups",
+   "fieldtype": "Table MultiSelect",
+   "label": "Exclude Customer Groups (WC Receivable)",
+   "options": "Company Dashboard Customer Group Link"
+  },
+  {
+   "fieldname": "column_break_wc",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Supplier Groups to exclude from Trade Payable in Working Capital dashboard.",
+   "fieldname": "wc_exclude_supplier_groups",
+   "fieldtype": "Table MultiSelect",
+   "label": "Exclude Supplier Groups (WC Payable)",
+   "options": "Company Dashboard Supplier Group Link"
+  },
+  {
    "fieldname": "notes_section",
    "fieldtype": "Section Break",
    "label": "Notes"
@@ -205,6 +232,10 @@
   {
    "read": 1,
    "role": "MIS Viewer"
+  },
+  {
+   "read": 1,
+   "role": "WC Viewer"
   }
  ],
  "sort_field": "modified",

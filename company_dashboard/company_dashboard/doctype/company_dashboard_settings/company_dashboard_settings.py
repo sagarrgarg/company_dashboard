@@ -183,7 +183,8 @@ _SEED_MAP: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
 )
 
 _MULTISELECT_FIELDS = tuple(f[0] for f in _SEED_MAP)
-_CUSTOMER_GROUP_FIELDS = ("customer_segment_groups",)
+_CUSTOMER_GROUP_FIELDS = ("customer_segment_groups", "wc_exclude_customer_groups")
+_SUPPLIER_GROUP_FIELDS = ("wc_exclude_supplier_groups",)
 
 
 class CompanyDashboardSettings(Document):
@@ -192,6 +193,8 @@ class CompanyDashboardSettings(Document):
 			self._dedupe(fieldname, key="account")
 		for fieldname in _CUSTOMER_GROUP_FIELDS:
 			self._dedupe(fieldname, key="customer_group")
+		for fieldname in _SUPPLIER_GROUP_FIELDS:
+			self._dedupe(fieldname, key="supplier_group")
 
 	def _dedupe(self, fieldname: str, key: str = "account") -> None:
 		rows = self.get(fieldname) or []
@@ -261,7 +264,28 @@ def get_allowed_customer_groups() -> list[str]:
 	return sorted(get_segment_root_map().keys())
 
 
+def get_wc_exclude_customer_groups() -> list[str]:
+	"""Customer groups to exclude from WC Trade Receivable."""
+	try:
+		doc = frappe.get_cached_doc("Company Dashboard Settings", "Company Dashboard Settings")
+	except frappe.DoesNotExistError:
+		return []
+	rows = doc.get("wc_exclude_customer_groups") or []
+	return [r.customer_group for r in rows if getattr(r, "customer_group", None)]
+
+
+def get_wc_exclude_supplier_groups() -> list[str]:
+	"""Supplier groups to exclude from WC Trade Payable."""
+	try:
+		doc = frappe.get_cached_doc("Company Dashboard Settings", "Company Dashboard Settings")
+	except frappe.DoesNotExistError:
+		return []
+	rows = doc.get("wc_exclude_supplier_groups") or []
+	return [r.supplier_group for r in rows if getattr(r, "supplier_group", None)]
+
+
 MIS_VIEWER_ROLE = "MIS Viewer"
+WC_VIEWER_ROLE = "WC Viewer"
 
 # Default go-to-market channel records seeded as top-level Customer Groups on first
 # install. Used by the SS & Distributor / Channel pages to bucket customers. Admins can
@@ -285,6 +309,18 @@ def ensure_mis_viewer_role() -> None:
 		return
 	role = frappe.new_doc("Role")
 	role.role_name = MIS_VIEWER_ROLE
+	role.desk_access = 1
+	role.disabled = 0
+	role.flags.ignore_permissions = True
+	role.insert()
+
+
+def ensure_wc_viewer_role() -> None:
+	"""Idempotently create the WC Viewer role used to gate /bizdashboard/wc access."""
+	if frappe.db.exists("Role", WC_VIEWER_ROLE):
+		return
+	role = frappe.new_doc("Role")
+	role.role_name = WC_VIEWER_ROLE
 	role.desk_access = 1
 	role.disabled = 0
 	role.flags.ignore_permissions = True
@@ -327,6 +363,7 @@ def seed_defaults() -> dict:
 	exists so admins can grant dashboard-only access.
 	"""
 	ensure_mis_viewer_role()
+	ensure_wc_viewer_role()
 	channel_groups_added = ensure_channel_customer_groups()
 	doc = frappe.get_single("Company Dashboard Settings")
 	added: dict[str, int] = {f: 0 for f in _MULTISELECT_FIELDS}

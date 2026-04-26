@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 const src = resolve("../company_dashboard/public/company_dashboard/index.html");
-const dest = resolve("../company_dashboard/www/mis.html");
+const dest = resolve("../company_dashboard/www/bizdashboard.html");
 
 const boot = `
 <script>

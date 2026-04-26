@@ -13,6 +13,7 @@ import { TaxModeTabs } from "@/components/widgets/TaxModeTabs";
 import { DownloadButtons } from "@/components/widgets/DownloadButtons";
 import { KpiTile } from "@/components/widgets/KpiTile";
 import { useCustomerSegments } from "@/hooks/useOverview";
+import { PreparedReportHeader } from "@/components/widgets/PreparedReportHeader";
 import { cn, formatINRShort, formatPct } from "@/lib/utils";
 import type { CustomerSegment, IntentFilter, PeriodSelection, TaxMode } from "@/types/mis";
 
@@ -22,6 +23,8 @@ interface Props {
 	period: PeriodSelection;
 	onPeriodChange: (next: PeriodSelection) => void;
 	onCompanyResolved?: (company: string) => void;
+	refreshKey: number;
+	onRefreshed: () => void;
 }
 
 const ALL_TAB = "__all__";
@@ -38,10 +41,12 @@ export function CustomerSegmentsPage({
 	period,
 	onPeriodChange,
 	onCompanyResolved,
+	refreshKey,
+	onRefreshed,
 }: Props) {
 	const [activeTab, setActiveTab] = useState<string>(ALL_TAB);
 	const [intent, setIntent] = useState<IntentFilter>("all");
-	const { data, error, isLoading } = useCustomerSegments(taxMode, period, intent);
+	const { data, error, isLoading } = useCustomerSegments(taxMode, period, intent, refreshKey);
 	const res = data?.message;
 
 	useEffect(() => {
@@ -58,6 +63,7 @@ export function CustomerSegmentsPage({
 
 	return (
 		<>
+			<PreparedReportHeader refreshedAt={res?.refreshed_at} section="mis" onRefreshed={onRefreshed} />
 			<header className="flex justify-between items-start mb-6 gap-4">
 				<div>
 					<div className="text-[10px] font-semibold tracking-[0.16em] uppercase text-green mb-1">

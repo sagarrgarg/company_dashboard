@@ -169,6 +169,7 @@ export interface CustomerSegmentsResponse {
 		aov: number;
 		gm_pct: number;
 	};
+	refreshed_at?: string;
 }
 
 export interface SkuAssortmentResponse {
@@ -188,6 +189,7 @@ export interface SkuAssortmentResponse {
 		marketing_pct: number;
 		variable_pct: number;
 	};
+	refreshed_at?: string;
 }
 
 /** CM2 deductions: freight + packaging + transaction fees/commissions + schemes. */
@@ -244,4 +246,5 @@ export interface OverviewResponse {
 	cm2_inputs: Cm2Inputs;
 	cm3_inputs: Cm3Inputs;
 	ladder_inputs: LadderInputs;
+	refreshed_at?: string;
 }

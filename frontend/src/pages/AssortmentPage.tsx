@@ -3,6 +3,7 @@ import { PeriodPicker } from "@/components/widgets/PeriodPicker";
 import { TaxModeTabs } from "@/components/widgets/TaxModeTabs";
 import { DownloadButtons } from "@/components/widgets/DownloadButtons";
 import { useSkuAssortment } from "@/hooks/useOverview";
+import { PreparedReportHeader } from "@/components/widgets/PreparedReportHeader";
 import { cn, formatINRShort, formatPct } from "@/lib/utils";
 import type { IntentFilter, PeriodSelection, SkuRow, TaxMode } from "@/types/mis";
 
@@ -12,6 +13,8 @@ interface Props {
 	period: PeriodSelection;
 	onPeriodChange: (next: PeriodSelection) => void;
 	onCompanyResolved?: (company: string) => void;
+	refreshKey: number;
+	onRefreshed: () => void;
 }
 
 const INTENTS: Array<{ key: IntentFilter; label: string }> = [
@@ -38,6 +41,8 @@ export function AssortmentPage({
 	period,
 	onPeriodChange,
 	onCompanyResolved,
+	refreshKey,
+	onRefreshed,
 }: Props) {
 	const [intent, setIntent] = useState<IntentFilter>("all");
 	const [search, setSearch] = useState("");
@@ -45,7 +50,7 @@ export function AssortmentPage({
 	const [sortField, setSortField] = useState<SortField>("revenue");
 	const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
-	const { data, error, isLoading } = useSkuAssortment(taxMode, period, intent);
+	const { data, error, isLoading } = useSkuAssortment(taxMode, period, intent, refreshKey);
 	const res = data?.message;
 
 	useEffect(() => {
@@ -84,6 +89,7 @@ export function AssortmentPage({
 
 	return (
 		<>
+			<PreparedReportHeader refreshedAt={res?.refreshed_at} section="mis" onRefreshed={onRefreshed} />
 			<header className="flex justify-between items-start mb-6 gap-4">
 				<div>
 					<div className="text-[10px] font-semibold tracking-[0.16em] uppercase text-green mb-1">

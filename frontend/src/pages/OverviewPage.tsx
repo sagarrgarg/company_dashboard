@@ -8,6 +8,7 @@ import { TaxModeTabs } from "@/components/widgets/TaxModeTabs";
 import { PeriodPicker } from "@/components/widgets/PeriodPicker";
 import { DownloadButtons } from "@/components/widgets/DownloadButtons";
 import { useOverview } from "@/hooks/useOverview";
+import { PreparedReportHeader } from "@/components/widgets/PreparedReportHeader";
 import { cn, formatDelta, formatINRShort, formatPct } from "@/lib/utils";
 import type { OverviewResponse, PeriodSelection, TaxMode } from "@/types/mis";
 
@@ -22,6 +23,8 @@ interface Props {
 	period: PeriodSelection;
 	onPeriodChange: (next: PeriodSelection) => void;
 	onCompanyResolved?: (company: string) => void;
+	refreshKey: number;
+	onRefreshed: () => void;
 }
 
 export function OverviewPage({
@@ -30,8 +33,10 @@ export function OverviewPage({
 	period,
 	onPeriodChange,
 	onCompanyResolved,
+	refreshKey,
+	onRefreshed,
 }: Props) {
-	const { data, error, isLoading } = useOverview(taxMode, period);
+	const { data, error, isLoading } = useOverview(taxMode, period, refreshKey);
 	const res = data?.message;
 	const resolvedCompany = res?.company;
 
@@ -60,6 +65,7 @@ export function OverviewPage({
 			onTaxModeChange={onTaxModeChange}
 			period={period}
 			onPeriodChange={onPeriodChange}
+			onRefreshed={onRefreshed}
 		/>
 	);
 }
@@ -70,12 +76,14 @@ function OverviewBody({
 	onTaxModeChange,
 	period,
 	onPeriodChange,
+	onRefreshed,
 }: {
 	res: OverviewResponse;
 	taxMode: TaxMode;
 	onTaxModeChange: (mode: TaxMode) => void;
 	period: PeriodSelection;
 	onPeriodChange: (next: PeriodSelection) => void;
+	onRefreshed: () => void;
 }) {
 	const { kpi, monthly, categories, period: periodInfo } = res;
 	const totalDelta = formatDelta(pctDelta(kpi.total_revenue, kpi.total_revenue_prior));
@@ -91,6 +99,7 @@ function OverviewBody({
 
 	return (
 		<>
+			<PreparedReportHeader refreshedAt={res.refreshed_at} section="mis" onRefreshed={onRefreshed} />
 			<header className="flex justify-between items-start mb-7 gap-4">
 				<div>
 					<div className="text-[10px] font-semibold tracking-[0.16em] uppercase text-green mb-1">

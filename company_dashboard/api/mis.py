@@ -65,29 +65,65 @@ TAX_MODES = {"incl": AMT_INCL, "excl": AMT_EXCL}
 # here is just for transparency. Anyone else needs the explicit ``MIS Viewer`` role
 # (auto-created by ``ensure_mis_viewer_role``) to view /mis or call the MIS APIs.
 MIS_ACCESS_ROLES = frozenset({"System Manager", "MIS Viewer"})
+WC_ACCESS_ROLES = frozenset({"System Manager", "WC Viewer"})
+DASHBOARD_ACCESS_ROLES = MIS_ACCESS_ROLES | WC_ACCESS_ROLES
 
 
-def has_mis_permission():
+def has_dashboard_permission():
 	"""Used by ``add_to_apps_screen`` to decide if the tile shows."""
 	user = frappe.session.user
 	if user == "Administrator":
 		return True
-	return bool(set(frappe.get_roles(user)) & MIS_ACCESS_ROLES)
+	return bool(set(frappe.get_roles(user)) & DASHBOARD_ACCESS_ROLES)
+
+
+# Keep old name as alias for backward compat with any external callers.
+has_mis_permission = has_dashboard_permission
+
+
+def _require_dashboard_access():
+	"""Throw PermissionError unless caller has any dashboard role (MIS or WC)."""
+	user = frappe.session.user
+	if user == "Guest":
+		frappe.throw(_("Login required."), frappe.PermissionError)
+	if user == "Administrator":
+		return
+	if not (set(frappe.get_roles(user)) & DASHBOARD_ACCESS_ROLES):
+		frappe.throw(
+			_("You need one of these roles to access the dashboard: {0}").format(
+				", ".join(sorted(DASHBOARD_ACCESS_ROLES))
+			),
+			frappe.PermissionError,
+		)
 
 
 def _require_mis_access():
-	"""Throw PermissionError unless caller has MIS access. Use on every whitelisted
-	method — the SPA shell does its own check too, but defence in depth matters since
-	API endpoints can be called directly via /api/method/."""
+	"""Throw PermissionError unless caller has MIS access."""
 	user = frappe.session.user
 	if user == "Guest":
-		frappe.throw(_("Login required to view MIS."), frappe.PermissionError)
+		frappe.throw(_("Login required."), frappe.PermissionError)
 	if user == "Administrator":
 		return
 	if not (set(frappe.get_roles(user)) & MIS_ACCESS_ROLES):
 		frappe.throw(
-			_("You need one of these roles to view the MIS dashboard: {0}").format(
+			_("You need one of these roles to view MIS: {0}").format(
 				", ".join(sorted(MIS_ACCESS_ROLES))
+			),
+			frappe.PermissionError,
+		)
+
+
+def _require_wc_access():
+	"""Throw PermissionError unless caller has Working Capital access."""
+	user = frappe.session.user
+	if user == "Guest":
+		frappe.throw(_("Login required."), frappe.PermissionError)
+	if user == "Administrator":
+		return
+	if not (set(frappe.get_roles(user)) & WC_ACCESS_ROLES):
+		frappe.throw(
+			_("You need one of these roles to view Working Capital: {0}").format(
+				", ".join(sorted(WC_ACCESS_ROLES))
 			),
 			frappe.PermissionError,
 		)
@@ -624,18 +660,19 @@ def get_sku_assortment(
 	to_date: str | None = None,
 	intent: str = "all",
 ) -> dict:
-	"""Per-SKU revenue + monthly trend + per-SKU CM ladder allocation.
-
-	``intent`` is ``"all"`` | ``"b2c"`` | ``"b2b"`` and matches against the
-	``Item.custom_sales_intent`` prefix. Internal-customer invoices are excluded.
-
-	**Per-SKU allocation rule**: GL deductions (freight, packaging, txn fees, schemes,
-	marketing) carry no SKU dimension at the source, so we allocate company-wide totals
-	to each SKU by **revenue share against company-period revenue** (``sku_rev /
-	company_rev × gl_total``). Aggregate sums reconcile to the Overview page; per-SKU
-	figures carry the allocation caveat — same disclosure used everywhere else.
-	"""
+	"""Per-SKU revenue + monthly trend + per-SKU CM ladder allocation (24-hour cache)."""
 	_require_mis_access()
+	from company_dashboard.api.report_cache import get_or_compute as _cached
+	params = {"tax_mode": tax_mode, "from_date": from_date, "to_date": to_date, "intent": intent}
+	return _cached("mis", "sku_assortment", lambda: _compute_sku_assortment(tax_mode, from_date, to_date, intent), params)
+
+
+def _compute_sku_assortment(
+	tax_mode: str = "incl",
+	from_date: str | None = None,
+	to_date: str | None = None,
+	intent: str = "all",
+) -> dict:
 	if not _erpnext_installed():
 		frappe.throw(_("ERPNext is not installed on this site."))
 
@@ -802,23 +839,25 @@ def get_customer_segments(
 	top_n_customers: int = 10,
 	top_n_categories: int = 10,
 ) -> dict:
-	"""Per-Customer-Group analysis with monthly trend and customer / category drilldown.
-
-	Customer Group is sourced from the **Customer master** (``tabCustomer.customer_group``),
-	not the cached field on Sales Invoice. This means re-tagging a customer in ERPNext
-	immediately moves all their historical revenue into the new bucket — no need to
-	re-issue invoices. Admins seed the channel buckets (GT Distribution / Modern Trade /
-	QuickCommerce / Ecommerce / Wholesale) via ``ensure_channel_customer_groups``; the
-	page surfaces *all* groups that had revenue in the period (including ``(unassigned)``
-	for customers with no group set on the master). Internal customers are excluded as
-	everywhere else.
-
-	Output is denormalised so the frontend can render the segment tabs with no follow-up
-	calls. Heavy lift is per-group: 4 SQL passes (current rollup, prior rollup, monthly,
-	top-N customers and categories) bounded by group count, so it stays cheap even on
-	50-group tenants.
-	"""
+	"""Per-Customer-Group analysis (24-hour cache)."""
 	_require_mis_access()
+	from company_dashboard.api.report_cache import get_or_compute as _cached
+	params = {"tax_mode": tax_mode, "from_date": from_date, "to_date": to_date, "intent": intent}
+	return _cached(
+		"mis", "customer_segments",
+		lambda: _compute_customer_segments(tax_mode, from_date, to_date, intent, top_n_customers, top_n_categories),
+		params,
+	)
+
+
+def _compute_customer_segments(
+	tax_mode: str = "incl",
+	from_date: str | None = None,
+	to_date: str | None = None,
+	intent: str = "all",
+	top_n_customers: int = 10,
+	top_n_categories: int = 10,
+) -> dict:
 	if not _erpnext_installed():
 		frappe.throw(_("ERPNext is not installed on this site."))
 
@@ -1077,33 +1116,34 @@ def get_customer_segments(
 
 
 @frappe.whitelist()
-def create_mis_user(
+def create_dashboard_user(
 	email: str,
 	first_name: str,
 	last_name: str = "",
 	password: str | None = None,
 	send_welcome_email: bool = False,
+	mis: bool = True,
+	wc: bool = False,
 ) -> dict:
-	"""One-shot helper to provision a dashboard-only user.
+	"""Provision a dashboard-only user with MIS and/or WC Viewer roles.
 
-	Creates (or updates) a ``System User`` with only the ``MIS Viewer`` role, so they
-	can sign in to /mis but have no rights elsewhere on the bench. Always restricted
-	to admins (System Manager) — a regular MIS Viewer cannot bootstrap more users.
-
-	Idempotent: if the user already exists, the role is added if missing and the
-	password is rotated only when explicitly supplied.
+	Always restricted to System Manager. Idempotent: existing users get roles
+	updated and password rotated only when explicitly supplied.
 	"""
 	if frappe.session.user != "Administrator" and "System Manager" not in frappe.get_roles(
 		frappe.session.user
 	):
-		frappe.throw(_("Only a System Manager can create MIS users."), frappe.PermissionError)
+		frappe.throw(_("Only a System Manager can create dashboard users."), frappe.PermissionError)
 
 	from company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings import (
 		MIS_VIEWER_ROLE,
+		WC_VIEWER_ROLE,
 		ensure_mis_viewer_role,
+		ensure_wc_viewer_role,
 	)
 
 	ensure_mis_viewer_role()
+	ensure_wc_viewer_role()
 
 	existing = frappe.db.exists("User", email)
 	if existing:
@@ -1117,9 +1157,11 @@ def create_mis_user(
 		user.user_type = "System User"
 		user.send_welcome_email = 1 if send_welcome_email else 0
 
-	# Strip every other role; this account exists only for the MIS dashboard.
 	user.set("roles", [])
-	user.append("roles", {"role": MIS_VIEWER_ROLE})
+	if mis:
+		user.append("roles", {"role": MIS_VIEWER_ROLE})
+	if wc:
+		user.append("roles", {"role": WC_VIEWER_ROLE})
 
 	if password:
 		user.new_password = password
@@ -1136,8 +1178,12 @@ def create_mis_user(
 		"updated": bool(existing),
 		"roles": [r.role for r in user.roles],
 		"login_url": "/login",
-		"dashboard_url": "/mis",
+		"dashboard_url": "/bizdashboard",
 	}
+
+
+# Backward compat alias
+create_mis_user = create_dashboard_user
 
 
 @frappe.whitelist()
@@ -1166,14 +1212,18 @@ def get_overview(
 	from_date: str | None = None,
 	to_date: str | None = None,
 ) -> dict:
-	"""Overview KPIs + monthly trend + category mix.
-
-	``tax_mode`` is ``"incl"`` (default) or ``"excl"``. ``from_date`` / ``to_date``
-	override the default Trailing-12-Months window — pass either a fiscal-year range
-	from ``get_fiscal_years`` or custom ISO dates. Prior-period values for YoY deltas
-	are computed as the same-length window immediately preceding ``from_date``.
-	"""
+	"""Overview KPIs + monthly trend + category mix (24-hour prepared-report cache)."""
 	_require_mis_access()
+	from company_dashboard.api.report_cache import get_or_compute as _cached
+	params = {"tax_mode": tax_mode, "from_date": from_date, "to_date": to_date}
+	return _cached("mis", "overview", lambda: _compute_overview(tax_mode, from_date, to_date), params)
+
+
+def _compute_overview(
+	tax_mode: str = "incl",
+	from_date: str | None = None,
+	to_date: str | None = None,
+) -> dict:
 	if not _erpnext_installed():
 		frappe.throw(_("ERPNext is not installed on this site."))
 

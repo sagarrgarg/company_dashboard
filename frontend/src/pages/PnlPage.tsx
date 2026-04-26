@@ -5,6 +5,7 @@ import { DownloadButtons } from "@/components/widgets/DownloadButtons";
 import { PnlTable } from "@/components/widgets/PnlTable";
 import { PnlWaterfallChart } from "@/components/widgets/PnlWaterfallChart";
 import { useOverview } from "@/hooks/useOverview";
+import { PreparedReportHeader } from "@/components/widgets/PreparedReportHeader";
 import { buildPnlSteps, type PnlBucket } from "@/lib/pnl";
 import { cn, formatINRShort, formatPct } from "@/lib/utils";
 import type { PeriodSelection, TaxMode } from "@/types/mis";
@@ -15,6 +16,8 @@ interface Props {
 	period: PeriodSelection;
 	onPeriodChange: (next: PeriodSelection) => void;
 	onCompanyResolved?: (company: string) => void;
+	refreshKey: number;
+	onRefreshed: () => void;
 }
 
 const BUCKETS: Array<{ key: PnlBucket; label: string }> = [
@@ -29,9 +32,11 @@ export function PnlPage({
 	period,
 	onPeriodChange,
 	onCompanyResolved,
+	refreshKey,
+	onRefreshed,
 }: Props) {
 	const [bucket, setBucket] = useState<PnlBucket>("overall");
-	const { data, error, isLoading } = useOverview(taxMode, period);
+	const { data, error, isLoading } = useOverview(taxMode, period, refreshKey);
 	const res = data?.message;
 
 	useEffect(() => {
@@ -74,6 +79,8 @@ export function PnlPage({
 			company={res.company}
 			subtitle={`${res.period.label} · ${taxLabel}`}
 			totals={{ revenue, pat, patPct }}
+			refreshedAt={res.refreshed_at}
+			onRefreshed={onRefreshed}
 		>
 			<div className="flex items-center gap-1 p-1 rounded-full border border-border-md bg-surface w-fit mb-4 shadow-[0_1px_2px_rgba(40,30,15,.05)]">
 				{BUCKETS.map((b) => (
@@ -119,6 +126,8 @@ function Shell({
 	company,
 	subtitle,
 	totals,
+	refreshedAt,
+	onRefreshed,
 	children,
 }: {
 	taxMode: TaxMode;
@@ -128,10 +137,15 @@ function Shell({
 	company?: string;
 	subtitle?: string;
 	totals?: { revenue: number; pat: number; patPct: number };
+	refreshedAt?: string;
+	onRefreshed?: () => void;
 	children: React.ReactNode;
 }) {
 	return (
 		<>
+			{refreshedAt && onRefreshed && (
+				<PreparedReportHeader refreshedAt={refreshedAt} section="mis" onRefreshed={onRefreshed} />
+			)}
 			<header className="flex justify-between items-start mb-7 gap-4">
 				<div>
 					<div className="text-[10px] font-semibold tracking-[0.16em] uppercase text-green mb-1">

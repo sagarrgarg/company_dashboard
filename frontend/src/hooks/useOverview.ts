@@ -8,7 +8,7 @@ import type {
 	TaxMode,
 } from "@/types/mis";
 
-export function useOverview(taxMode: TaxMode, period: PeriodSelection) {
+export function useOverview(taxMode: TaxMode, period: PeriodSelection, refreshKey = 0) {
 	const params: Record<string, string> = { tax_mode: taxMode };
 	if (period.kind !== "ttm") {
 		params.from_date = period.from;
@@ -18,7 +18,7 @@ export function useOverview(taxMode: TaxMode, period: PeriodSelection) {
 	return useFrappeGetCall<{ message: OverviewResponse }>(
 		"company_dashboard.api.mis.get_overview",
 		params,
-		`mis.get_overview::${taxMode}::${key}`,
+		`mis.get_overview::${taxMode}::${key}::${refreshKey}`,
 		{ revalidateOnFocus: false, dedupingInterval: 60_000 },
 	);
 }
@@ -34,7 +34,7 @@ export function useFiscalYears() {
 	);
 }
 
-export function useSkuAssortment(taxMode: TaxMode, period: PeriodSelection, intent: IntentFilter) {
+export function useSkuAssortment(taxMode: TaxMode, period: PeriodSelection, intent: IntentFilter, refreshKey = 0) {
 	const params: Record<string, string> = { tax_mode: taxMode, intent };
 	if (period.kind !== "ttm") {
 		params.from_date = period.from;
@@ -44,7 +44,7 @@ export function useSkuAssortment(taxMode: TaxMode, period: PeriodSelection, inte
 	return useFrappeGetCall<{ message: SkuAssortmentResponse }>(
 		"company_dashboard.api.mis.get_sku_assortment",
 		params,
-		`mis.get_sku_assortment::${taxMode}::${key}`,
+		`mis.get_sku_assortment::${taxMode}::${key}::${refreshKey}`,
 		{ revalidateOnFocus: false, dedupingInterval: 60_000 },
 	);
 }
@@ -53,6 +53,7 @@ export function useCustomerSegments(
 	taxMode: TaxMode,
 	period: PeriodSelection,
 	intent: IntentFilter,
+	refreshKey = 0,
 ) {
 	const params: Record<string, string> = { tax_mode: taxMode, intent };
 	if (period.kind !== "ttm") {
@@ -63,7 +64,7 @@ export function useCustomerSegments(
 	return useFrappeGetCall<{ message: CustomerSegmentsResponse }>(
 		"company_dashboard.api.mis.get_customer_segments",
 		params,
-		`mis.get_customer_segments::${taxMode}::${key}`,
+		`mis.get_customer_segments::${taxMode}::${key}::${refreshKey}`,
 		{ revalidateOnFocus: false, dedupingInterval: 60_000 },
 	);
 }

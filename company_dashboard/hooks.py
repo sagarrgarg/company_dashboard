@@ -10,14 +10,14 @@ add_to_apps_screen = [
 	{
 		"name": "company_dashboard",
 		"logo": "/assets/company_dashboard/logo.png",
-		"title": "MIS",
-		"route": "/mis",
-		"has_permission": "company_dashboard.api.mis.has_mis_permission",
+		"title": "Biz Dashboard",
+		"route": "/bizdashboard",
+		"has_permission": "company_dashboard.api.mis.has_dashboard_permission",
 	}
 ]
 
 website_route_rules = [
-	{"from_route": "/mis/<path:app_path>", "to_route": "mis"},
+	{"from_route": "/bizdashboard/<path:app_path>", "to_route": "bizdashboard"},
 ]
 
 boot_session = "company_dashboard.boot.boot_session"
@@ -30,7 +30,7 @@ after_migrate = [
 # Apps
 # ------------------
 
-# required_apps = []
+required_apps = ["business_needed_solutions"]
 
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
