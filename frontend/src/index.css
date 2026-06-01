@@ -38,6 +38,16 @@
 
 	/* Focus ring — used on all interactive tiles / tabs */
 	--focus: #1f5f33;
+
+	/* Sidebar (dark olive bg #14231A) — warm cream link text for legibility on dark.
+	   Tuned for ~12:1 contrast on the sidebar bg without going pure-white (which read cold). */
+	--sidebar-text: #f4ecd6;        /* default link */
+	--sidebar-text-muted: #c9bf9d;  /* disabled / soon links */
+	--sidebar-text-active: #faf6e8; /* selected link */
+	--sidebar-hover-bg: rgba(244, 236, 214, 0.10);
+	--sidebar-active-bg: rgba(244, 236, 214, 0.16);
+	--sidebar-active-rail: rgba(250, 246, 232, 0.95);
+	--sidebar-divider: rgba(244, 236, 214, 0.18);
 }
 
 html,
@@ -112,6 +122,24 @@ body {
 	}
 	.chg {
 		@apply text-[10px] font-semibold px-1.5 py-[2px] rounded-[10px] tabular-nums;
+	}
+
+	/* Sidebar nav links — cream-on-dark. Variables live in :root so the palette
+	   can be tuned from one place. */
+	.sidebar-link {
+		color: var(--sidebar-text);
+	}
+	.sidebar-link:hover:not(.sidebar-link--disabled) {
+		background-color: var(--sidebar-hover-bg);
+		color: var(--sidebar-text-active);
+	}
+	.sidebar-link--active {
+		background-color: var(--sidebar-active-bg);
+		color: var(--sidebar-text-active);
+		box-shadow: inset 2px 0 0 var(--sidebar-active-rail);
+	}
+	.sidebar-link--disabled {
+		color: var(--sidebar-text-muted);
 	}
 
 	/* Consistent focus ring for all interactive elements */

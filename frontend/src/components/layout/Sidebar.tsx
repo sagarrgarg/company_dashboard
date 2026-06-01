@@ -145,20 +145,30 @@ export function Sidebar({ company, period, sections }: SidebarProps) {
 		return acc;
 	}, {});
 	return (
-		<nav className="fixed top-0 left-0 bottom-0 w-[232px] bg-sidebar-bg flex flex-col px-4 py-6 z-50 overflow-y-auto border-r border-black/20">
+		<nav
+			className="fixed top-0 left-0 bottom-0 w-[232px] bg-sidebar-bg flex flex-col px-4 py-6 z-50 overflow-y-auto border-r border-black/20"
+			style={{ color: "var(--sidebar-text)" }}
+		>
 			<div
-				className="font-serif text-white text-[22px] leading-tight mb-1 break-words"
+				className="font-serif text-[22px] leading-tight mb-1 break-words"
+				style={{ color: "var(--sidebar-text-active)" }}
 				title={brand}
 			>
 				{brand}
 			</div>
-			<div className="text-[10px] tracking-[0.14em] uppercase text-white/55 mb-7 font-medium">
+			<div
+				className="text-[10px] tracking-[0.14em] uppercase mb-7 font-medium"
+				style={{ color: "var(--sidebar-text-muted)" }}
+			>
 				Biz Dashboard
 			</div>
 
 			{Object.entries(groups).map(([group, items]) => (
 				<div key={group}>
-					<div className="text-[9px] font-semibold text-white/50 tracking-[0.14em] uppercase px-2 mt-5 mb-1.5">
+					<div
+						className="text-[9px] font-semibold tracking-[0.14em] uppercase px-2 mt-5 mb-1.5"
+						style={{ color: "var(--sidebar-text-muted)" }}
+					>
 						{group}
 					</div>
 					{items.map((it) => (
@@ -168,13 +178,11 @@ export function Sidebar({ company, period, sections }: SidebarProps) {
 							end={it.to === "/mis"}
 							className={({ isActive }) =>
 								cn(
-									"flex items-center gap-2.5 px-2.5 py-[7px] rounded-lg text-[13px] mb-[1px] transition-colors",
+									"sidebar-link flex items-center gap-2.5 px-2.5 py-[7px] rounded-lg text-[13px] mb-[1px] transition-colors",
 									it.disabled
-										? "text-white/40 cursor-not-allowed"
-										: "text-white/82 hover:bg-white/10 hover:text-white cursor-pointer",
-									isActive &&
-										!it.disabled &&
-										"bg-white/[.16] text-white font-medium shadow-[inset_2px_0_0_rgba(234,243,230,0.9)]",
+										? "sidebar-link--disabled cursor-not-allowed"
+										: "cursor-pointer",
+									isActive && !it.disabled && "sidebar-link--active font-medium",
 								)
 							}
 							onClick={(e) => {
@@ -184,7 +192,10 @@ export function Sidebar({ company, period, sections }: SidebarProps) {
 							{it.icon}
 							{it.label}
 							{it.disabled && (
-								<span className="ml-auto text-[8px] tracking-wider uppercase text-white/40 font-medium">
+								<span
+									className="ml-auto text-[8px] tracking-wider uppercase font-medium"
+									style={{ color: "var(--sidebar-text-muted)" }}
+								>
 									soon
 								</span>
 							)}
@@ -193,8 +204,14 @@ export function Sidebar({ company, period, sections }: SidebarProps) {
 				</div>
 			))}
 
-			<div className="mt-auto pt-4 border-t border-white/15">
-				<div className="text-[10px] text-white/55 leading-[1.7]">
+			<div
+				className="mt-auto pt-4"
+				style={{ borderTop: "1px solid var(--sidebar-divider)" }}
+			>
+				<div
+					className="text-[10px] leading-[1.7]"
+					style={{ color: "var(--sidebar-text-muted)" }}
+				>
 					{period ?? "Trailing 12 months"}
 					<br />
 					Company Dashboard · Frappe

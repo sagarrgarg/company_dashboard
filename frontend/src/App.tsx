@@ -18,9 +18,40 @@ export interface DashboardSections {
 	wc: boolean;
 }
 
+export type ComingSoonKey =
+	| "ebitda"
+	| "ebit"
+	| "pat"
+	| "gross_profit"
+	| "active_skus"
+	| "unclassified_rev"
+	| "operating_opex"
+	| "interest_finance"
+	| "income_tax";
+
+export type ComingSoonTiles = Record<ComingSoonKey, boolean>;
+
+const EMPTY_COMING_SOON: ComingSoonTiles = {
+	ebitda: false,
+	ebit: false,
+	pat: false,
+	gross_profit: false,
+	active_skus: false,
+	unclassified_rev: false,
+	operating_opex: false,
+	interest_finance: false,
+	income_tax: false,
+};
+
 function readBoot() {
 	const boot = window.frappe?.boot as
-		| { company_dashboard?: { default_company?: string; sections?: DashboardSections } }
+		| {
+				company_dashboard?: {
+					default_company?: string;
+					sections?: DashboardSections;
+					coming_soon_tiles?: Partial<ComingSoonTiles>;
+				};
+		  }
 		| undefined;
 	return boot?.company_dashboard;
 }
@@ -31,6 +62,11 @@ function readInitialCompany(): string {
 
 function readSections(): DashboardSections {
 	return readBoot()?.sections ?? { mis: true, wc: true };
+}
+
+function readComingSoon(): ComingSoonTiles {
+	const raw = readBoot()?.coming_soon_tiles ?? {};
+	return { ...EMPTY_COMING_SOON, ...raw };
 }
 
 function readInitialTaxMode(): TaxMode {
@@ -69,6 +105,7 @@ export default function App() {
 	const [period, setPeriodState] = useState<PeriodSelection>(readInitialPeriod);
 	const [misRefreshKey, setMisRefreshKey] = useState(0);
 	const sections = useMemo(readSections, []);
+	const comingSoon = useMemo(readComingSoon, []);
 
 	const onMisRefreshed = useCallback(() => setMisRefreshKey((k) => k + 1), []);
 
@@ -129,6 +166,7 @@ export default function App() {
 												onCompanyResolved={companyCallback}
 												refreshKey={misRefreshKey}
 												onRefreshed={onMisRefreshed}
+												comingSoon={comingSoon}
 											/>
 										}
 									/>

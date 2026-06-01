@@ -1,6 +1,9 @@
 import frappe
 
 from company_dashboard.api.mis import MIS_ACCESS_ROLES, WC_ACCESS_ROLES
+from company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings import (
+	get_coming_soon_tiles,
+)
 
 
 def boot_session(bootinfo):
@@ -16,4 +19,5 @@ def boot_session(bootinfo):
 			"mis": is_admin or bool(roles & MIS_ACCESS_ROLES),
 			"wc": is_admin or bool(roles & WC_ACCESS_ROLES),
 		},
+		"coming_soon_tiles": get_coming_soon_tiles(),
 	}

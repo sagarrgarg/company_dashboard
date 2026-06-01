@@ -186,6 +186,21 @@ _MULTISELECT_FIELDS = tuple(f[0] for f in _SEED_MAP)
 _CUSTOMER_GROUP_FIELDS = ("customer_segment_groups", "wc_exclude_customer_groups")
 _SUPPLIER_GROUP_FIELDS = ("wc_exclude_supplier_groups",)
 
+# Map the doctype Check fieldnames to the stable tile keys consumed by the SPA.
+# Adding a new key here + a matching Check field in the JSON is all that's needed
+# to expose another tile as toggleable.
+COMING_SOON_FIELDS: dict[str, str] = {
+	"ebitda": "coming_soon_ebitda",
+	"ebit": "coming_soon_ebit",
+	"pat": "coming_soon_pat",
+	"gross_profit": "coming_soon_gross_profit",
+	"active_skus": "coming_soon_active_skus",
+	"unclassified_rev": "coming_soon_unclassified_rev",
+	"operating_opex": "coming_soon_operating_opex",
+	"interest_finance": "coming_soon_interest_finance",
+	"income_tax": "coming_soon_income_tax",
+}
+
 
 class CompanyDashboardSettings(Document):
 	def validate(self):
@@ -272,6 +287,17 @@ def get_wc_exclude_customer_groups() -> list[str]:
 		return []
 	rows = doc.get("wc_exclude_customer_groups") or []
 	return [r.customer_group for r in rows if getattr(r, "customer_group", None)]
+
+
+def get_coming_soon_tiles() -> dict[str, bool]:
+	"""Return a map of tile-key -> bool indicating which Overview tiles should render
+	a ``Coming soon`` overlay instead of their computed value. Always returns the full
+	key set so the SPA never has to check for missing keys."""
+	try:
+		doc = frappe.get_cached_doc("Company Dashboard Settings", "Company Dashboard Settings")
+	except frappe.DoesNotExistError:
+		return {k: False for k in COMING_SOON_FIELDS}
+	return {tile: bool(doc.get(field)) for tile, field in COMING_SOON_FIELDS.items()}
 
 
 def get_wc_exclude_supplier_groups() -> list[str]:

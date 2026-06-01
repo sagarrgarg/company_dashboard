@@ -11,6 +11,7 @@ import { useOverview } from "@/hooks/useOverview";
 import { PreparedReportHeader } from "@/components/widgets/PreparedReportHeader";
 import { cn, formatDelta, formatINRShort, formatPct } from "@/lib/utils";
 import type { OverviewResponse, PeriodSelection, TaxMode } from "@/types/mis";
+import type { ComingSoonTiles } from "@/App";
 
 function pctDelta(cur: number, prior: number): number | null {
 	if (!prior) return null;
@@ -25,6 +26,7 @@ interface Props {
 	onCompanyResolved?: (company: string) => void;
 	refreshKey: number;
 	onRefreshed: () => void;
+	comingSoon: ComingSoonTiles;
 }
 
 export function OverviewPage({
@@ -35,6 +37,7 @@ export function OverviewPage({
 	onCompanyResolved,
 	refreshKey,
 	onRefreshed,
+	comingSoon,
 }: Props) {
 	const { data, error, isLoading } = useOverview(taxMode, period, refreshKey);
 	const res = data?.message;
@@ -66,6 +69,7 @@ export function OverviewPage({
 			period={period}
 			onPeriodChange={onPeriodChange}
 			onRefreshed={onRefreshed}
+			comingSoon={comingSoon}
 		/>
 	);
 }
@@ -77,6 +81,7 @@ function OverviewBody({
 	period,
 	onPeriodChange,
 	onRefreshed,
+	comingSoon,
 }: {
 	res: OverviewResponse;
 	taxMode: TaxMode;
@@ -84,6 +89,7 @@ function OverviewBody({
 	period: PeriodSelection;
 	onPeriodChange: (next: PeriodSelection) => void;
 	onRefreshed: () => void;
+	comingSoon: ComingSoonTiles;
 }) {
 	const { kpi, monthly, categories, period: periodInfo } = res;
 	const totalDelta = formatDelta(pctDelta(kpi.total_revenue, kpi.total_revenue_prior));
@@ -227,6 +233,7 @@ function OverviewBody({
 					value={formatPct(kpi.ebitda_pct)}
 					accent={kpi.ebitda_pct > 5 ? "green" : kpi.ebitda_pct > 0 ? "amber" : "red"}
 					meta={`CM3 − ${formatINRShort(res.ladder_inputs.operating_total)} opex`}
+					comingSoon={comingSoon.ebitda}
 				/>
 				<KpiTile
 					label="EBIT"
@@ -237,18 +244,21 @@ function OverviewBody({
 							? `EBITDA − ${formatINRShort(res.ladder_inputs.da_total)} D&A`
 							: "no D&A booked TTM"
 					}
+					comingSoon={comingSoon.ebit}
 				/>
 				<KpiTile
 					label="PAT"
 					value={formatPct(kpi.pat_pct)}
 					accent={kpi.pat_pct > 0 ? "green" : "red"}
 					meta={`− ${formatINRShort(res.ladder_inputs.interest_total)} int · ${formatINRShort(res.ladder_inputs.tax_total)} tax`}
+					comingSoon={comingSoon.pat}
 				/>
 				<KpiTile
 					label="Gross Profit"
 					value={formatINRShort(kpi.gross_profit)}
 					accent={kpi.gross_profit > 0 ? "green" : "red"}
 					meta="abs ₹ · TTM"
+					comingSoon={comingSoon.gross_profit}
 				/>
 			</div>
 
@@ -258,6 +268,7 @@ function OverviewBody({
 					value={String(kpi.active_skus)}
 					accent="blue"
 					meta="items with sales"
+					comingSoon={comingSoon.active_skus}
 				/>
 				<KpiTile
 					label="Unclassified Rev"
@@ -266,17 +277,20 @@ function OverviewBody({
 						kpi.unclassified_revenue > kpi.total_revenue * 0.2 ? "amber" : "default"
 					}
 					meta={`${Math.round((kpi.unclassified_revenue / (kpi.total_revenue || 1)) * 100)}% of total`}
+					comingSoon={comingSoon.unclassified_rev}
 				/>
 				<KpiTile
 					label="Operating Opex"
 					value={formatINRShort(res.ladder_inputs.operating_total)}
 					meta={`sal ${formatINRShort(res.ladder_inputs.salary_total)} · rent ${formatINRShort(res.ladder_inputs.rent_total)}`}
+					comingSoon={comingSoon.operating_opex}
 				/>
 				<KpiTile
 					label="Interest & Finance"
 					value={formatINRShort(res.ladder_inputs.interest_total)}
 					accent={res.ladder_inputs.interest_total > 0 ? "amber" : "default"}
 					meta={`${res.ladder_inputs.interest_accounts.length} account${res.ladder_inputs.interest_accounts.length === 1 ? "" : "s"}`}
+					comingSoon={comingSoon.interest_finance}
 				/>
 				<KpiTile
 					label="Income Tax"
@@ -286,6 +300,7 @@ function OverviewBody({
 							? `${res.ladder_inputs.tax_accounts.length} account${res.ladder_inputs.tax_accounts.length === 1 ? "" : "s"}`
 							: "none TTM (likely losses)"
 					}
+					comingSoon={comingSoon.income_tax}
 				/>
 			</div>
 

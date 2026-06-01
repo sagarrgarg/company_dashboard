@@ -28,6 +28,19 @@
   "interest_and_finance_accounts",
   "column_break_pat",
   "tax_expense_accounts",
+  "coming_soon_section",
+  "coming_soon_html",
+  "coming_soon_ebitda",
+  "coming_soon_ebit",
+  "coming_soon_pat",
+  "column_break_cs1",
+  "coming_soon_gross_profit",
+  "coming_soon_active_skus",
+  "coming_soon_unclassified_rev",
+  "column_break_cs2",
+  "coming_soon_operating_opex",
+  "coming_soon_interest_finance",
+  "coming_soon_income_tax",
   "wc_section",
   "wc_exclude_customer_groups",
   "column_break_wc",
@@ -172,6 +185,78 @@
    "fieldtype": "Table MultiSelect",
    "label": "Income Tax Expense (PAT)",
    "options": "Company Dashboard Account Link"
+  },
+  {
+   "fieldname": "coming_soon_section",
+   "fieldtype": "Section Break",
+   "label": "Coming Soon tiles — MIS Overview"
+  },
+  {
+   "fieldname": "coming_soon_html",
+   "fieldtype": "HTML",
+   "options": "<div style='padding:10px 12px;background:#fdf6e3;border-left:3px solid #96560f;border-radius:4px;font-size:12.5px;line-height:1.55;color:#574f3e'>Tick a tile to hide its value on the MIS Overview page and replace it with a <b>Coming soon</b> overlay. The tile stays in the layout so the grid doesn't shift. Useful when the underlying accounts are still being mapped and the number isn't trustworthy yet.</div>"
+  },
+  {
+   "default": "0",
+   "fieldname": "coming_soon_ebitda",
+   "fieldtype": "Check",
+   "label": "EBITDA"
+  },
+  {
+   "default": "0",
+   "fieldname": "coming_soon_ebit",
+   "fieldtype": "Check",
+   "label": "EBIT"
+  },
+  {
+   "default": "0",
+   "fieldname": "coming_soon_pat",
+   "fieldtype": "Check",
+   "label": "PAT"
+  },
+  {
+   "fieldname": "column_break_cs1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "coming_soon_gross_profit",
+   "fieldtype": "Check",
+   "label": "Gross Profit"
+  },
+  {
+   "default": "0",
+   "fieldname": "coming_soon_active_skus",
+   "fieldtype": "Check",
+   "label": "Active SKUs"
+  },
+  {
+   "default": "0",
+   "fieldname": "coming_soon_unclassified_rev",
+   "fieldtype": "Check",
+   "label": "Unclassified Revenue"
+  },
+  {
+   "fieldname": "column_break_cs2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "coming_soon_operating_opex",
+   "fieldtype": "Check",
+   "label": "Operating Opex"
+  },
+  {
+   "default": "0",
+   "fieldname": "coming_soon_interest_finance",
+   "fieldtype": "Check",
+   "label": "Interest & Finance"
+  },
+  {
+   "default": "0",
+   "fieldname": "coming_soon_income_tax",
+   "fieldtype": "Check",
+   "label": "Income Tax"
   },
   {
    "fieldname": "wc_section",
