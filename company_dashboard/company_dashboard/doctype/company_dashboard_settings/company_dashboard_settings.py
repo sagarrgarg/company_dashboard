@@ -211,6 +211,14 @@ class CompanyDashboardSettings(Document):
 		for fieldname in _SUPPLIER_GROUP_FIELDS:
 			self._dedupe(fieldname, key="supplier_group")
 
+	def on_update(self):
+		# The /bizdashboard SPA reads coming_soon_tiles (and sections) from the boot
+		# payload, which Frappe caches per-user in redis under the "bootinfo" hash and
+		# does NOT tie to this doctype. Without this, a saved toggle only takes effect
+		# after a manual `bench clear-cache`. Drop the whole bootinfo hash so any user's
+		# next dashboard load rebuilds boot with the new flags.
+		frappe.cache.delete_value("bootinfo")
+
 	def _dedupe(self, fieldname: str, key: str = "account") -> None:
 		rows = self.get(fieldname) or []
 		seen: set[str] = set()
