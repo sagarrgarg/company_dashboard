@@ -64,5 +64,14 @@ def clear_section(section: str) -> int:
 def refresh_dashboard(section: str) -> dict:
 	if section not in ("mis", "wc"):
 		frappe.throw("Invalid section — must be 'mis' or 'wc'")
+	# Gate by the same role that guards the section's read endpoints — otherwise any
+	# authenticated user could repeatedly wipe the cache and force the heavy BNS AR/AP +
+	# FIFO aging reports to recompute (a cheap DoS on an expensive path).
+	from company_dashboard.api.mis import _require_mis_access, _require_wc_access
+
+	if section == "mis":
+		_require_mis_access()
+	else:
+		_require_wc_access()
 	cleared = clear_section(section)
 	return {"status": "ok", "section": section, "cleared": cleared}

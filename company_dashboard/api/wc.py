@@ -274,15 +274,19 @@ def _top_parties(data: list[dict], limit: int = 10) -> list[dict]:
 	for row in sorted_data[:limit]:
 		outstanding = flt(row.get("outstanding", 0))
 		age = 0
-		# Use the highest non-zero range bucket to approximate age
+		# Use the highest non-zero range bucket to approximate age. Each bucket maps to the
+		# *lower edge* of its overdue span (range1=0-30d → 0, range2=31-60d → 31, …); using
+		# the lower bound with >= thresholds keeps the status correct. (Previously the bucket
+		# floor 0/30/60/90 was compared with strict >, so a 31-60d balance scored age=30 and
+		# 30>30 was False → mislabeled "Current", and 61-90d showed as "Watch" not "Overdue".)
 		for i in range(5, 0, -1):
 			if flt(row.get(f"range{i}", 0)) > 0:
-				age = [0, 30, 60, 90, 120][min(i - 1, 4)]
+				age = [0, 31, 61, 91, 121][min(i - 1, 4)]
 				break
 
-		if age > 60:
+		if age >= 61:
 			status = "Overdue"
-		elif age > 30:
+		elif age >= 31:
 			status = "Watch"
 		else:
 			status = "Current"

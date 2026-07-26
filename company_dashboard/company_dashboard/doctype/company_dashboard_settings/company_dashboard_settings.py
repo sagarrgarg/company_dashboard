@@ -219,6 +219,16 @@ class CompanyDashboardSettings(Document):
 		# next dashboard load rebuilds boot with the new flags.
 		frappe.cache.delete_value("bootinfo")
 
+		# The MIS/WC pages themselves serve from a 24h prepared-report cache keyed only by
+		# section+endpoint (see api/report_cache.py). Account-bucket mappings and the WC
+		# customer/supplier exclusions edited here feed those computations directly, so a
+		# save must also drop the prepared-report cache — otherwise the dashboards keep
+		# showing pre-change CM/AR/AP figures until the 24h TTL lapses.
+		from company_dashboard.api.report_cache import clear_section
+
+		clear_section("mis")
+		clear_section("wc")
+
 	def _dedupe(self, fieldname: str, key: str = "account") -> None:
 		rows = self.get(fieldname) or []
 		seen: set[str] = set()

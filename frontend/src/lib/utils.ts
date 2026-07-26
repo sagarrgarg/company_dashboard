@@ -10,7 +10,7 @@ export function formatINRShort(value: number): string {
 	if (value == null || Number.isNaN(value)) return "—";
 	const abs = Math.abs(value);
 	if (abs >= 1_00_00_000) return `₹${(value / 1_00_00_000).toFixed(1)}Cr`;
-	if (abs >= 1_00_000) return `₹${Math.round(value / 1_00_000)}L`;
+	if (abs >= 1_00_000) return `₹${(value / 1_00_000).toFixed(1)}L`;
 	if (abs >= 1_000) return `₹${(value / 1_000).toFixed(1)}K`;
 	return `₹${Math.round(value)}`;
 }

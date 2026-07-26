@@ -66,16 +66,19 @@ function ProgressBar({
 	color: string;
 	valueStr: string;
 }) {
+	// Clamp both ends: a negative share (e.g. a net-negative bank/advance balance) must not
+	// produce a negative CSS width or a negative percent label.
+	const clamped = Math.max(0, Math.min(pct, 100));
 	return (
 		<div className="grid grid-cols-[1fr_100px_8px_72px] items-center gap-2 mb-2">
 			<span className="text-[12.5px] font-medium truncate">{label}</span>
 			<div className="h-[7px] bg-surface-2 rounded-full overflow-hidden border border-border">
 				<div
 					className="h-full rounded-full transition-all duration-700"
-					style={{ width: `${Math.min(pct, 100)}%`, background: color }}
+					style={{ width: `${clamped}%`, background: color }}
 				/>
 			</div>
-			<span className="text-[10px] font-mono text-text-3 text-right">{Math.round(pct)}%</span>
+			<span className="text-[10px] font-mono text-text-3 text-right">{Math.round(clamped)}%</span>
 			<span className="text-[12px] font-mono font-semibold text-right" style={{ color }}>
 				{valueStr}
 			</span>
@@ -171,8 +174,9 @@ function KpiCard({
 /* ── Bank Detail Card ───────────────────────────────────────────────────── */
 
 function BankSection({ refreshKey }: { refreshKey: number }) {
-	const { data, isLoading } = useBankDetail(refreshKey);
+	const { data, isLoading, error } = useBankDetail(refreshKey);
 	const d = data?.message;
+	if (error) return <ErrorCard message={error.message} />;
 	if (isLoading || !d) return <LoadingCard />;
 	const total = d.total_balance;
 
@@ -316,8 +320,9 @@ function BankTrendSvg({ trend }: { trend: BankTrendPoint[] }) {
 /* ── Trade Receivable ───────────────────────────────────────────────────── */
 
 function ReceivableSection({ refreshKey }: { refreshKey: number }) {
-	const { data, isLoading } = useTradeReceivable(refreshKey);
+	const { data, isLoading, error } = useTradeReceivable(refreshKey);
 	const d = data?.message;
+	if (error) return <ErrorCard message={error.message} />;
 	if (isLoading || !d) return <LoadingCard />;
 
 	const agingColors = ["var(--green-mid)", "var(--amber)", "var(--red)", "#991B1B", "#991B1B"];
@@ -392,8 +397,9 @@ function ReceivableSection({ refreshKey }: { refreshKey: number }) {
 /* ── Trade Payable ──────────────────────────────────────────────────────── */
 
 function PayableSection({ refreshKey }: { refreshKey: number }) {
-	const { data, isLoading } = useTradePayable(refreshKey);
+	const { data, isLoading, error } = useTradePayable(refreshKey);
 	const d = data?.message;
+	if (error) return <ErrorCard message={error.message} />;
 	if (isLoading || !d) return <LoadingCard />;
 
 	const agingColors = ["var(--green-mid)", "var(--amber)", "var(--red)", "#991B1B", "#991B1B"];
@@ -603,7 +609,7 @@ function WarehouseTreeRow({
 }
 
 function StockSection({ refreshKey }: { refreshKey: number }) {
-	const { data, isLoading } = useStockDetail(refreshKey);
+	const { data, isLoading, error } = useStockDetail(refreshKey);
 	const d = data?.message;
 	const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -616,6 +622,7 @@ function StockSection({ refreshKey }: { refreshKey: number }) {
 		});
 	}, []);
 
+	if (error) return <ErrorCard message={error.message} />;
 	if (isLoading || !d) return <LoadingCard />;
 
 	const total = d.total_stock_value;
@@ -749,6 +756,17 @@ function LoadingCard() {
 			<div className="h-8 bg-surface-2 rounded w-1/2 mb-4" />
 			<div className="h-3 bg-surface-2 rounded w-full mb-2" />
 			<div className="h-3 bg-surface-2 rounded w-2/3" />
+		</div>
+	);
+}
+
+function ErrorCard({ message }: { message?: string }) {
+	return (
+		<div className="card">
+			<div className="card-title text-red">Failed to load</div>
+			<p className="text-[13px] text-text-2 mt-1">
+				{message ?? "This section could not be loaded. Try Refresh."}
+			</p>
 		</div>
 	);
 }

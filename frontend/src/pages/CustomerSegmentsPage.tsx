@@ -311,6 +311,9 @@ function SegmentDetail({
 	monthKeys: string[];
 }) {
 	const share = totalRevenue ? (segment.revenue / totalRevenue) * 100 : 0;
+	// Segment names contain spaces (e.g. "Modern Trade"); an SVG gradient id / url(#…)
+	// with a space is invalid, so the area fill silently disappears. Slug it.
+	const segId = `fillSeg-${segment.segment.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 	const trendData = useMemo(
 		() =>
 			monthKeys.map((mk) => ({
@@ -373,7 +376,7 @@ function SegmentDetail({
 					<ResponsiveContainer width="100%" height={220}>
 						<AreaChart data={trendData} margin={{ top: 8, right: 12, left: -12, bottom: 0 }}>
 							<defs>
-								<linearGradient id={`fillSeg-${segment.segment}`} x1="0" y1="0" x2="0" y2="1">
+								<linearGradient id={segId} x1="0" y1="0" x2="0" y2="1">
 									<stop offset="0%" stopColor="#1F5F33" stopOpacity={0.28} />
 									<stop offset="100%" stopColor="#1F5F33" stopOpacity={0} />
 								</linearGradient>
@@ -409,7 +412,7 @@ function SegmentDetail({
 								dataKey="revenue"
 								stroke="#1F5F33"
 								strokeWidth={2.25}
-								fill={`url(#fillSeg-${segment.segment})`}
+								fill={`url(#${segId})`}
 							/>
 						</AreaChart>
 					</ResponsiveContainer>

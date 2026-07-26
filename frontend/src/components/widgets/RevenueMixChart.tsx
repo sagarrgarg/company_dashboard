@@ -1,4 +1,5 @@
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
+import { formatINRShort } from "@/lib/utils";
 
 const COLORS = ["#1F5F33", "#96560F"];
 
@@ -35,7 +36,7 @@ export function RevenueMixChart({ b2c, b2b }: { b2c: number; b2b: number }) {
 						))}
 					</Pie>
 					<Tooltip
-						formatter={(v: number) => `₹${v.toFixed(1)}L`}
+						formatter={(v: number) => formatINRShort(v)}
 						contentStyle={{
 							background: "#fff",
 							border: "1px solid rgba(40,30,15,.18)",

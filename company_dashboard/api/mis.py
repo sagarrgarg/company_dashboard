@@ -158,6 +158,19 @@ def _ttm_window(anchor: date | None = None) -> Period:
 	return _build_period(from_date, to_date, label_prefix="Trailing 12 months")
 
 
+def _ttm_cache_anchor(from_date: str | None, to_date: str | None) -> dict:
+	"""Cache-key fragment that pins the trailing-12-months window to the current month.
+
+	When ``from_date``/``to_date`` are omitted the endpoint computes a TTM window anchored
+	on ``today()``, but the prepared-report cache key drops ``None`` params — so without an
+	anchor the key is date-less and (given the 24h TTL) keeps serving the previous month's
+	window after a period rollover. Returns ``{}`` for explicit ranges (already in the key)
+	so their keys are unchanged."""
+	if from_date and to_date:
+		return {}
+	return {"ttm_anchor": _ttm_window().to_date.isoformat()}
+
+
 def _custom_window(from_date: date, to_date: date) -> Period:
 	"""User-selected range. Prior period is the immediately-preceding same-length window."""
 	if to_date < from_date:
@@ -663,7 +676,7 @@ def get_sku_assortment(
 	"""Per-SKU revenue + monthly trend + per-SKU CM ladder allocation (24-hour cache)."""
 	_require_mis_access()
 	from company_dashboard.api.report_cache import get_or_compute as _cached
-	params = {"tax_mode": tax_mode, "from_date": from_date, "to_date": to_date, "intent": intent}
+	params = {"tax_mode": tax_mode, "from_date": from_date, "to_date": to_date, "intent": intent, **_ttm_cache_anchor(from_date, to_date)}
 	return _cached("mis", "sku_assortment", lambda: _compute_sku_assortment(tax_mode, from_date, to_date, intent), params)
 
 
@@ -842,7 +855,17 @@ def get_customer_segments(
 	"""Per-Customer-Group analysis (24-hour cache)."""
 	_require_mis_access()
 	from company_dashboard.api.report_cache import get_or_compute as _cached
-	params = {"tax_mode": tax_mode, "from_date": from_date, "to_date": to_date, "intent": intent}
+	# top_n_* MUST be in the cache key — they change the sliced row counts, so omitting
+	# them would serve a cached 10-row payload to a caller asking for 25 (or vice-versa).
+	params = {
+		"tax_mode": tax_mode,
+		"from_date": from_date,
+		"to_date": to_date,
+		"intent": intent,
+		"top_n_customers": top_n_customers,
+		"top_n_categories": top_n_categories,
+		**_ttm_cache_anchor(from_date, to_date),
+	}
 	return _cached(
 		"mis", "customer_segments",
 		lambda: _compute_customer_segments(tax_mode, from_date, to_date, intent, top_n_customers, top_n_categories),
@@ -899,10 +922,11 @@ def _compute_customer_segments(
 			select
 				coalesce(c.customer_group, '(unassigned)')                                          as segment,
 				coalesce(sum({amt_expr}), 0)                                                         as revenue,
+				coalesce(sum({AMT_EXCL}), 0)                                                          as revenue_excl,
 				coalesce(sum(
 					coalesce(nullif(sii.incoming_rate, 0), dni.incoming_rate, 0) * sii.stock_qty
 				), 0)                                                                                 as cogs,
-				coalesce(sum(case when sii.incoming_rate > 0 or dni.incoming_rate > 0 then {amt_expr} else 0 end), 0) as rev_valuated,
+				coalesce(sum(case when sii.incoming_rate > 0 or dni.incoming_rate > 0 then {AMT_EXCL} else 0 end), 0) as rev_valuated,
 				si.customer                                                                          as customer,
 				count(distinct si.name)                                                              as invoices
 			from {SII_BASE_FROM}
@@ -924,6 +948,7 @@ def _compute_customer_segments(
 				{
 					"segment": seg,
 					"revenue": 0.0,
+					"revenue_excl": 0.0,
 					"cogs": 0.0,
 					"rev_valuated": 0.0,
 					"_customers": set(),
@@ -931,6 +956,7 @@ def _compute_customer_segments(
 				},
 			)
 			bucket["revenue"] += flt(r["revenue"])
+			bucket["revenue_excl"] += flt(r["revenue_excl"])
 			bucket["cogs"] += flt(r["cogs"])
 			bucket["rev_valuated"] += flt(r["rev_valuated"])
 			if r.get("customer"):
@@ -1055,13 +1081,21 @@ def _compute_customer_segments(
 
 	# Assemble per-segment payload, sorted by revenue desc.
 	segments: list[dict] = []
+	total_rev_val = 0.0  # tax-exclusive valuated revenue — coherent blended-margin denominator
 	for seg, cur in current.items():
 		rev = flt(cur["revenue"])
+		# Margin is ALWAYS tax-exclusive: COGS (incoming_rate) is net of GST, so both
+		# rev_valuated and its coverage denominator use AMT_EXCL regardless of the display
+		# tax_mode. Matching net COGS against tax-inclusive revenue would inflate every
+		# segment's margin by ~the GST rate (the same rule get_overview / _gross_margin
+		# enforce). `revenue` still honours tax_mode for display.
+		rev_excl = flt(cur["revenue_excl"])
 		rev_val = flt(cur["rev_valuated"])
 		cogs = flt(cur["cogs"])
 		gp = rev_val - cogs
 		gm_pct = (gp / rev_val * 100) if rev_val else 0.0
-		coverage = (rev_val / rev * 100) if rev else 0.0
+		coverage = (rev_val / rev_excl * 100) if rev_excl else 0.0
+		total_rev_val += rev_val
 		invoices = int(cur["invoices"])
 		customers = int(cur["customers"])
 		prev = prior.get(seg, {})
@@ -1095,13 +1129,11 @@ def _compute_customer_segments(
 		"segment_count": len(segments),
 	}
 	totals["aov"] = (totals["revenue"] / totals["invoices"]) if totals["invoices"] else 0.0
-	totals["gm_pct"] = (
-		sum(s["gp"] for s in segments)
-		/ sum(s["revenue"] for s in segments if s["gm_coverage_pct"] > 0)
-		* 100
-		if sum(s["revenue"] for s in segments if s["gm_coverage_pct"] > 0)
-		else 0.0
-	)
+	# Blended margin = total valuated GP / total valuated (tax-exclusive) revenue — a
+	# coherent ratio: numerator and denominator span the same valuated lines. (Previously
+	# this divided valuated GP by full display revenue over a different segment subset,
+	# which both understated the ratio and, in incl mode, mixed GST into the denominator.)
+	totals["gm_pct"] = (totals["gp"] / total_rev_val * 100) if total_rev_val else 0.0
 
 	return {
 		"period": period.as_dict(),
@@ -1215,7 +1247,7 @@ def get_overview(
 	"""Overview KPIs + monthly trend + category mix (24-hour prepared-report cache)."""
 	_require_mis_access()
 	from company_dashboard.api.report_cache import get_or_compute as _cached
-	params = {"tax_mode": tax_mode, "from_date": from_date, "to_date": to_date}
+	params = {"tax_mode": tax_mode, "from_date": from_date, "to_date": to_date, **_ttm_cache_anchor(from_date, to_date)}
 	return _cached("mis", "overview", lambda: _compute_overview(tax_mode, from_date, to_date), params)
 
 
