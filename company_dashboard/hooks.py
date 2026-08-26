@@ -28,9 +28,7 @@ after_migrate = [
 ]
 
 # Apps
-# ------------------
-
-required_apps = ["business_needed_solutions"]
+# ------------------required_apps = ["business_needed_solutions"]
 
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
