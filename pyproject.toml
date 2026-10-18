@@ -4,7 +4,7 @@ authors = [
     { name = "Sagar", email = "sagar1ratan1garg1@gmail.com"}
 ]
 description = "Company Dashboard"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]
 dependencies = [
