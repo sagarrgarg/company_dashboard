@@ -1,11 +1,11 @@
-import { cn, formatINRShort, formatPct } from "@/lib/utils";
+import { cn, formatINR, formatMargin, marginState, marginTitle } from "@/lib/utils";
 import type { PnlStep } from "@/lib/pnl";
+import { MarginValue, SoonValue } from "@/components/widgets/MarginValue";
 
-/** Sample.html's `.plt` treatment: sub-lines indented in grey, tier rows bolded
- *  with a shaded background, numbers right-aligned. Percentages are % of Gross
- *  Revenue (stays consistent even as the waterfall goes negative). */
+/** Sample.html's `.plt` treatment: sub-lines indented in grey, tier rows bolded with a
+ *  shaded background, numbers right-aligned. Every line comes from the API ladder; all
+ *  amounts and % are on tax-exclusive revenue. */
 export function PnlTable({ steps }: { steps: PnlStep[] }) {
-	const revenue = steps[0]?.subtotal ?? 0;
 	return (
 		<div className="card !p-0 overflow-hidden">
 			<div className="px-5 pt-4 pb-3 flex items-center justify-between border-b border-border">
@@ -13,7 +13,7 @@ export function PnlTable({ steps }: { steps: PnlStep[] }) {
 					P&amp;L — line by line
 				</div>
 				<div className="text-[9px] tracking-[0.1em] uppercase text-text-3 font-medium">
-					tax-excl · ₹
+					ex-tax · ₹ · % of ex-tax revenue
 				</div>
 			</div>
 			<table className="w-full text-[12px] tabular-nums">
@@ -28,8 +28,7 @@ export function PnlTable({ steps }: { steps: PnlStep[] }) {
 				<tbody>
 					{steps.map((step) => {
 						const isTier = step.kind === "tier" || step.kind === "anchor";
-						const pct = revenue ? (step.subtotal / revenue) * 100 : 0;
-						const pctDed = revenue ? (step.amount / revenue) * 100 : 0;
+						const value = isTier ? step.subtotal : step.amount;
 						return (
 							<tr
 								key={step.key}
@@ -37,6 +36,7 @@ export function PnlTable({ steps }: { steps: PnlStep[] }) {
 									"border-b border-border last:border-b-0",
 									isTier && "bg-surface-2 font-semibold",
 								)}
+								title={step.accounts.length ? step.accounts.join("\n") : undefined}
 							>
 								<td
 									className={cn(
@@ -49,25 +49,32 @@ export function PnlTable({ steps }: { steps: PnlStep[] }) {
 								</td>
 								<td
 									className={cn(
-										"px-3 py-2 text-right",
+										"px-3 py-2 text-right whitespace-nowrap",
 										step.kind === "deduction" ? "text-amber" : "text-text",
 										isTier && step.subtotal < 0 && "text-red",
-										isTier && step.subtotal >= 0 && "text-text",
 									)}
 								>
-									{formatINRShort(isTier ? step.subtotal : step.amount)}
+									{step.hidden || step.amountHidden ? <SoonValue /> : formatINR(value)}
 								</td>
-								<td
-									className={cn(
-										"px-3 py-2 text-right",
-										isTier
-											? step.subtotal >= 0
-												? "text-text-2"
-												: "text-red"
-											: "text-text-3",
+								<td className="px-3 py-2 text-right whitespace-nowrap">
+									{step.hidden ? (
+										<SoonValue />
+									) : isTier ? (
+										<MarginValue
+											pct={step.pct}
+											colorFor={(p) => (p >= 0 ? "text-text-2" : "text-red")}
+										/>
+									) : (
+										<span
+											className={cn(
+												"text-text-3",
+												marginState(step.pct) === "bogus" && "text-amber font-semibold cursor-help",
+											)}
+											title={marginTitle(step.pct)}
+										>
+											{formatMargin(step.pct)}
+										</span>
 									)}
-								>
-									{isTier ? formatPct(pct) : formatPct(pctDed)}
 								</td>
 								<td className="px-5 py-2 text-right text-[10.5px] text-text-3">
 									{step.note ?? ""}

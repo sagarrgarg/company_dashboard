@@ -1,20 +1,22 @@
 import { useEffect, useRef, useState } from "react";
-import { cn } from "@/lib/utils";
+import { cn, describePeriod, errorMessage, shortDate } from "@/lib/utils";
 import { useFiscalYears } from "@/hooks/useOverview";
 import type { FiscalYear, PeriodSelection } from "@/types/mis";
 
 interface Props {
 	value: PeriodSelection;
 	onChange: (next: PeriodSelection) => void;
+	/** Company whose fiscal years to list ("" = server default). */
+	company?: string;
 }
 
-/** Top-right period control: Trailing 12M · Fiscal Year · Custom from-to.
+/** Top-right period control: Last 12 months · Fiscal Year · Custom from-to.
  *  Click the pill to open a small popover with all three options; selection
  *  bubbles up via ``onChange`` and is labeled inline so users can see what's
  *  currently in effect without opening the popover. */
-export function PeriodPicker({ value, onChange }: Props) {
+export function PeriodPicker({ value, onChange, company = "" }: Props) {
 	const [open, setOpen] = useState(false);
-	const { data } = useFiscalYears();
+	const { data, error: fyError } = useFiscalYears(company);
 	const fiscalYears: FiscalYear[] = data?.message ?? [];
 	const rootRef = useRef<HTMLDivElement>(null);
 
@@ -27,7 +29,7 @@ export function PeriodPicker({ value, onChange }: Props) {
 		return () => document.removeEventListener("mousedown", handleClick);
 	}, [open]);
 
-	const label = describe(value);
+	const label = describePeriod(value);
 
 	return (
 		<div ref={rootRef} className="relative">
@@ -78,9 +80,20 @@ export function PeriodPicker({ value, onChange }: Props) {
 								setOpen(false);
 							}}
 						>
-							Trailing 12 months
+							Last 12 months
+							<span className="text-text-3 text-[10px] font-normal ml-1">
+								current month to date
+							</span>
 						</OptionButton>
 					</Section>
+
+					{fyError && (
+						<Section label="Fiscal year">
+							<div className="px-1 text-[11px] text-red" role="alert">
+								Couldn't load fiscal years: {errorMessage(fyError)}
+							</div>
+						</Section>
+					)}
 
 					{fiscalYears.length > 0 && (
 						<Section label="Fiscal year">
@@ -100,7 +113,7 @@ export function PeriodPicker({ value, onChange }: Props) {
 								>
 									FY {fy.name}
 									<span className="text-text-3 text-[10px] font-normal ml-1">
-										{formatDate(fy.from)} – {formatDate(fy.to)}
+										{shortDate(fy.from)} – {shortDate(fy.to)}
 									</span>
 								</OptionButton>
 							))}
@@ -205,20 +218,4 @@ function CustomRangePicker({
 			</button>
 		</div>
 	);
-}
-
-function describe(p: PeriodSelection): string {
-	if (p.kind === "ttm") return "Trailing 12M";
-	if (p.kind === "fy") return `FY ${p.name}`;
-	return `${formatDate(p.from)} – ${formatDate(p.to)}`;
-}
-
-function formatDate(iso: string): string {
-	if (!iso) return "";
-	const [y, m, d] = iso.split("-");
-	const MONTHS = [
-		"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-		"Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-	];
-	return `${MONTHS[Number(m) - 1] ?? m} ${d} ${y}`;
 }

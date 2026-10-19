@@ -1,4 +1,4 @@
-import { cn, formatINRShort, formatPct } from "@/lib/utils";
+import { cn, formatINR, formatPct } from "@/lib/utils";
 import type { CategorySlice } from "@/types/mis";
 
 /** Top-N categories ranked by revenue with an inline mini-bar so the eye can scan
@@ -27,7 +27,7 @@ export function CategoryTable({ data }: { data: CategorySlice[] }) {
 				<tbody>
 					{data.map((row) => {
 						const share = (row.revenue / total) * 100;
-						const widthPct = max ? (row.revenue / max) * 100 : 0;
+						const widthPct = max > 0 ? Math.max(0, (row.revenue / max) * 100) : 0;
 						return (
 							<tr
 								key={row.category}
@@ -52,7 +52,7 @@ export function CategoryTable({ data }: { data: CategorySlice[] }) {
 										aria-hidden
 									/>
 									<span className="relative font-medium text-text">
-										{formatINRShort(row.revenue * 100000)}
+										{formatINR(row.revenue * 100000)}
 									</span>
 								</td>
 								<td
@@ -74,7 +74,7 @@ export function CategoryTable({ data }: { data: CategorySlice[] }) {
 							</span>
 						</td>
 						<td className="px-1.5 py-2 text-right text-text">
-							{formatINRShort(total * 100000)}
+							{formatINR(total * 100000)}
 						</td>
 						<td className="px-1.5 py-2 text-right text-text-2">100%</td>
 					</tr>

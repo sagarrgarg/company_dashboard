@@ -1,28 +1,43 @@
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
-import { formatINRShort } from "@/lib/utils";
+import { formatINR } from "@/lib/utils";
 
-const COLORS = ["#1F5F33", "#96560F"];
+export interface MixSlice {
+	name: string;
+	value: number;
+	/** Share of total revenue, rounded — the same number the KPI tiles show. */
+	share: number | null;
+	color: string;
+	/** Hidden by a "Coming soon" flag. */
+	hidden?: boolean;
+}
 
-export function RevenueMixChart({ b2c, b2b }: { b2c: number; b2b: number }) {
-	const data = [
-		{ name: "B2C", value: b2c },
-		{ name: "B2B", value: b2b },
-	];
-	const total = b2c + b2b || 1;
+/** Donut of the revenue split. Shares come from the caller (one shared computation, so the
+ *  donut and the tiles never disagree). Negative slices (net returns) can't be drawn and
+ *  are listed in the legend only. */
+export function RevenueMixChart({ slices }: { slices: MixSlice[] }) {
+	const drawable = slices.filter((s) => !s.hidden && s.value > 0);
 	return (
 		<>
 			<div className="flex flex-wrap gap-x-3.5 gap-y-2 mb-2.5">
-				{data.map((d, i) => (
+				{slices.map((d) => (
 					<div key={d.name} className="flex items-center gap-[5px] text-[11px] text-text-2">
-						<div className="w-2.5 h-2.5 rounded-sm" style={{ background: COLORS[i] }} />
-						{d.name} · {Math.round((d.value / total) * 100)}%
+						<div className="w-2.5 h-2.5 rounded-sm" style={{ background: d.color }} />
+						{d.name} ·{" "}
+						{d.hidden ? (
+							<span className="text-amber font-semibold uppercase text-[10px]">soon</span>
+						) : d.share == null ? (
+							"—"
+						) : (
+							`${d.share}%`
+						)}
+						{!d.hidden && d.value < 0 && <span className="text-text-3">(net returns)</span>}
 					</div>
 				))}
 			</div>
 			<ResponsiveContainer width="100%" height={140}>
 				<PieChart>
 					<Pie
-						data={data}
+						data={drawable}
 						cx="50%"
 						cy="50%"
 						innerRadius={40}
@@ -30,13 +45,14 @@ export function RevenueMixChart({ b2c, b2b }: { b2c: number; b2b: number }) {
 						paddingAngle={2}
 						dataKey="value"
 						stroke="none"
+						isAnimationActive={false}
 					>
-						{data.map((_, i) => (
-							<Cell key={i} fill={COLORS[i]} />
+						{drawable.map((d) => (
+							<Cell key={d.name} fill={d.color} />
 						))}
 					</Pie>
 					<Tooltip
-						formatter={(v: number) => formatINRShort(v)}
+						formatter={(v: number) => formatINR(v)}
 						contentStyle={{
 							background: "#fff",
 							border: "1px solid rgba(40,30,15,.18)",

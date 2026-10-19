@@ -1,196 +1,205 @@
-export interface KPI {
-	total_revenue: number;
-	total_revenue_prior: number;
-	b2c_revenue: number;
-	b2c_revenue_prior: number;
-	b2b_revenue: number;
-	b2b_revenue_prior: number;
-	unclassified_revenue: number;
-	gross_profit: number;
-	gross_margin_pct: number;
-	gross_margin_coverage_pct: number;
-	b2c_gross_profit: number;
-	b2c_gross_margin_pct: number;
-	b2c_gross_margin_coverage_pct: number;
-	b2b_gross_profit: number;
-	b2b_gross_margin_pct: number;
-	b2b_gross_margin_coverage_pct: number;
-	/** CM1 ≡ Gross Margin. Aliased from gross_profit / gross_margin_pct. */
-	cm1: number;
-	cm1_pct: number;
-	b2c_cm1: number;
-	b2c_cm1_pct: number;
-	b2b_cm1: number;
-	b2b_cm1_pct: number;
-	cm2: number;
-	cm2_pct: number;
-	cm2_deduction: number;
-	b2c_cm2: number;
-	b2c_cm2_pct: number;
-	b2b_cm2: number;
-	b2b_cm2_pct: number;
-	cm3: number;
-	cm3_pct: number;
-	cm3_deduction: number;
-	b2c_cm3: number;
-	b2c_cm3_pct: number;
-	b2b_cm3: number;
-	b2b_cm3_pct: number;
-	/** EBITDA = CM3 − fixed operating overhead (salary + rent + utilities + admin). */
-	ebitda: number;
-	ebitda_pct: number;
-	b2c_ebitda: number;
-	b2c_ebitda_pct: number;
-	b2b_ebitda: number;
-	b2b_ebitda_pct: number;
-	/** EBIT = EBITDA − D&A. */
-	ebit: number;
-	ebit_pct: number;
-	b2c_ebit: number;
-	b2c_ebit_pct: number;
-	b2b_ebit: number;
-	b2b_ebit_pct: number;
-	/** PBT and PAT. PBT = EBIT − interest. PAT = PBT − income-tax expense. */
-	pbt: number;
-	pbt_pct: number;
-	pat: number;
-	pat_pct: number;
-	b2c_pat: number;
-	b2c_pat_pct: number;
-	b2b_pat: number;
-	b2b_pat_pct: number;
-	active_skus: number;
-	avg_mrp: number;
+/* Types mirror the JSON returned by company_dashboard.api.mis.* exactly.
+ * Every *_pct margin is computed on tax-exclusive revenue and is `null` when that
+ * revenue is below the ₹1,000 floor (data_quality.rules.min_revenue_for_pct). */
+
+export type TaxMode = "incl" | "excl";
+
+export type IntentFilter = "all" | "b2c" | "b2b";
+
+/** Tiers that exist for every revenue bucket. */
+type TierFields<P extends string> = {
+	[K in
+		| `${P}gross_profit`
+		| `${P}cm1`
+		| `${P}cm2`
+		| `${P}cm3`
+		| `${P}ebitda`
+		| `${P}ebit`
+		| `${P}pbt`
+		| `${P}pat`]: number;
+} & {
+	[K in
+		| `${P}gross_margin_pct`
+		| `${P}gross_margin_coverage_pct`
+		| `${P}cm1_pct`
+		| `${P}cm2_pct`
+		| `${P}cm3_pct`
+		| `${P}ebitda_pct`
+		| `${P}ebit_pct`
+		| `${P}pbt_pct`
+		| `${P}pat_pct`]: number | null;
+};
+
+export type KPI = TierFields<""> &
+	TierFields<"b2c_"> &
+	TierFields<"b2b_"> &
+	TierFields<"unclassified_"> & {
+		/** Revenue fields follow the selected tax mode (display only). */
+		total_revenue: number;
+		total_revenue_prior: number;
+		b2c_revenue: number;
+		b2c_revenue_prior: number;
+		b2b_revenue: number;
+		b2b_revenue_prior: number;
+		unclassified_revenue: number;
+		unclassified_revenue_prior: number;
+		/** Tax-exclusive revenue — the base of every margin. */
+		total_revenue_excl: number;
+		b2c_revenue_excl: number;
+		b2b_revenue_excl: number;
+		unclassified_revenue_excl: number;
+		/** False when the prior window is not fully covered by data. */
+		prior_available: boolean;
+		cogs: number;
+		cogs_allocated: number;
+		cogs_unallocated: number;
+		direct_costs: number;
+		other_expenses: number;
+		other_income: number;
+		/** Net expense of internal (inter-company) transfer accounts; can be negative. */
+		internal_transfers: number;
+		gl_net_profit: number;
+		pat_residual: number;
+		cm2_deduction: number;
+		cm3_deduction: number;
+		active_skus: number;
+		avg_mrp: number | null;
+	};
+
+export interface PeriodPrior {
+	from: string;
+	to: string;
+	/** True only when the prior window is fully covered by sales data. */
+	available: boolean;
+	coverage_pct: number;
+	data_starts: string | null;
+}
+
+export interface PeriodInfo {
+	from: string;
+	to: string;
+	label: string;
+	kind: "ttm" | "fy" | "custom";
+	days: number;
+	is_12_months: boolean;
+	last_month_partial: boolean;
+	comparison_label: string;
+	prior: PeriodPrior;
+}
+
+export interface Basis {
+	revenue: TaxMode;
+	margins: "excl";
+}
+
+export interface DataAnomaly {
+	invoice: string;
+	item_code: string;
+	item_name: string;
+	customer: string;
+	month: string;
+	qty: number;
+	revenue: number;
+	cost: number;
+	unit_cost: number;
+}
+
+export interface DataWarning {
+	code: string;
+	bucket?: string;
+	account?: string;
+	message: string;
+}
+
+export interface DataQuality {
+	coverage_pct: number;
+	flagged_lines: number;
+	flagged_cost: number;
+	flagged_revenue: number;
+	anomalies: DataAnomaly[];
+	rules: {
+		min_revenue_for_pct: number;
+		min_cost: number;
+		cost_to_revenue: number;
+		unit_cost_to_median: number;
+	};
+	warnings: DataWarning[];
+	unallocated_cogs?: number;
+	pat_residual?: number;
+}
+
+/** Fields shared by every MIS response. */
+interface MisEnvelope {
+	period: PeriodInfo;
+	company: string;
+	tax_mode: TaxMode;
+	basis: Basis;
+	data_quality: DataQuality;
+	refreshed_at?: string;
+	stale?: boolean;
 }
 
 export interface MonthlyRevenuePoint {
+	key: string; // "YYYY-MM"
 	month: string; // "Apr"
 	year: number;
+	/** ₹ lakhs, selected tax mode. */
 	b2c: number;
 	b2b: number;
 	other: number;
 	total: number;
+	/** Month-to-date, or a partial first month. */
+	partial: boolean;
 }
 
 export interface CategorySlice {
 	category: string;
 	sku_count: number;
+	/** ₹ lakhs. */
 	revenue: number;
 }
 
-export type TaxMode = "incl" | "excl";
+export type PnlStepKey =
+	| "revenue"
+	| "cogs"
+	| "direct"
+	| "cm1"
+	| "freight"
+	| "packaging"
+	| "commission"
+	| "scheme"
+	| "cm2"
+	| "marketing"
+	| "cm3"
+	| "salary"
+	| "rent"
+	| "utility"
+	| "admin"
+	| "other"
+	| "internal"
+	| "ebitda"
+	| "da"
+	| "ebit"
+	| "interest"
+	| "pbt"
+	| "tax"
+	| "pat";
 
-/** Reporting period. "ttm" = trailing-12-months (backend default).
- *  "fy" = named fiscal year (resolved from Frappe's Fiscal Year doctype).
- *  "custom" = arbitrary date range. */
-export type PeriodSelection =
-	| { kind: "ttm" }
-	| { kind: "fy"; name: string; from: string; to: string }
-	| { kind: "custom"; from: string; to: string };
-
-export interface FiscalYear {
-	name: string;
-	from: string;
-	to: string;
+export interface ApiPnlStep {
+	key: PnlStepKey;
+	label: string;
+	kind: "anchor" | "deduction" | "tier";
+	/** Deductions are negative. */
+	amount: number;
+	/** Running total after the step. */
+	subtotal: number;
+	/** amount ÷ ex-tax revenue × 100. */
+	pct: number | null;
+	note: string | null;
+	group: "variable" | "operating" | null;
 }
 
-export type IntentFilter = "all" | "b2c" | "b2b";
-
-export interface SkuRow {
-	item_code: string;
-	item_name: string;
-	item_group: string;
-	intent: string;
-	revenue: number;
-	cogs: number;
-	gp: number;
-	gm_pct: number;
-	qty: number;
-	invoices: number;
-	monthly: Record<string, number>;
-	alloc_freight: number;
-	alloc_packaging: number;
-	alloc_commission: number;
-	alloc_scheme: number;
-	alloc_marketing: number;
-	alloc_variable: number;
-	cm2: number;
-	cm2_pct: number;
-	cm3: number;
-	cm3_pct: number;
-}
-
-export interface SegmentTopCustomer {
-	customer: string;
-	customer_name: string;
-	revenue: number;
-	invoices: number;
-}
-
-export interface SegmentTopCategory {
-	category: string;
-	sku_count: number;
-	revenue: number;
-}
-
-export interface CustomerSegment {
-	segment: string;
-	revenue: number;
-	prior_revenue: number;
-	yoy_pct: number | null;
-	customers: number;
-	invoices: number;
-	aov: number;
-	avg_customer_value: number;
-	gp: number;
-	gm_pct: number;
-	gm_coverage_pct: number;
-	monthly: Record<string, number>;
-	top_customers: SegmentTopCustomer[];
-	top_categories: SegmentTopCategory[];
-}
-
-export interface CustomerSegmentsResponse {
-	period: { from: string; to: string; label: string };
-	company: string;
-	tax_mode: TaxMode;
-	intent: IntentFilter;
-	/** Admin-selected roots from settings. Descendant Customer Groups are rolled up
-	 *  into their selected root before rendering — each root becomes one segment row. */
-	scope_roots: string[];
-	month_keys: string[];
-	segments: CustomerSegment[];
-	totals: {
-		revenue: number;
-		customers: number;
-		invoices: number;
-		gp: number;
-		segment_count: number;
-		aov: number;
-		gm_pct: number;
-	};
-	refreshed_at?: string;
-}
-
-export interface SkuAssortmentResponse {
-	period: { from: string; to: string; label: string };
-	company: string;
-	tax_mode: TaxMode;
-	intent: IntentFilter;
-	month_keys: string[]; // "YYYY-MM"
-	rows: SkuRow[];
-	totals: { sku_count: number; revenue: number; cogs: number; qty: number };
-	allocation: {
-		basis: string;
-		freight_pct: number;
-		packaging_pct: number;
-		commission_pct: number;
-		scheme_pct: number;
-		marketing_pct: number;
-		variable_pct: number;
-	};
-	refreshed_at?: string;
-}
+export type PnlBucket = "overall" | "b2c" | "b2b" | "unclassified";
 
 /** CM2 deductions: freight + packaging + transaction fees/commissions + schemes. */
 export interface Cm2Inputs {
@@ -215,13 +224,32 @@ export interface Cm3Inputs {
 	company_scope: string;
 }
 
-/** Below-CM3 ladder: EBITDA, EBIT, PBT, PAT deductions + the account lists behind each. */
+export interface AccountAmount {
+	account: string;
+	amount: number;
+}
+
 export interface LadderInputs {
+	cogs_total: number;
+	cogs_allocated: number;
+	cogs_unallocated: number;
+	cogs_accounts: AccountAmount[];
+	direct_total: number;
+	direct_accounts: string[];
 	salary_total: number;
 	rent_total: number;
 	utility_total: number;
 	admin_total: number;
 	operating_total: number;
+	other_expense_total: number;
+	other_income_total: number;
+	other_net_total: number;
+	unmapped_expense_accounts: AccountAmount[];
+	other_income_accounts: AccountAmount[];
+	internal_total: number;
+	internal_accounts: AccountAmount[];
+	revenue_gl_difference: number | null;
+	sales_gl: number | null;
 	da_total: number;
 	interest_total: number;
 	tax_total: number;
@@ -232,19 +260,161 @@ export interface LadderInputs {
 	da_accounts: string[];
 	interest_accounts: string[];
 	tax_accounts: string[];
+	gl_net_profit: number;
 	allocation_basis: string;
 	company_scope: string;
 }
 
-export interface OverviewResponse {
+export interface OverviewResponse extends MisEnvelope {
 	kpi: KPI;
+	pnl: Record<PnlBucket, ApiPnlStep[]>;
 	monthly: MonthlyRevenuePoint[];
 	categories: CategorySlice[];
-	period: { from: string; to: string; label: string };
-	company: string;
-	tax_mode: TaxMode;
 	cm2_inputs: Cm2Inputs;
 	cm3_inputs: Cm3Inputs;
 	ladder_inputs: LadderInputs;
-	refreshed_at?: string;
+	settings?: Record<string, unknown>;
+	debug?: Record<string, unknown>;
+}
+
+/** Reporting period selected in the UI. "ttm" = backend default (last 12 months,
+ *  current month to date). "fy" = named fiscal year. "custom" = arbitrary range. */
+export type PeriodSelection =
+	| { kind: "ttm" }
+	| { kind: "fy"; name: string; from: string; to: string }
+	| { kind: "custom"; from: string; to: string };
+
+export interface FiscalYear {
+	name: string;
+	from: string;
+	to: string;
+}
+
+export interface SkuRow {
+	item_code: string;
+	item_name: string;
+	item_group: string;
+	intent: string;
+	is_stock_item: number;
+	stock_uom: string;
+	/** Selected tax mode. */
+	revenue: number;
+	revenue_excl: number;
+	sold_revenue_excl: number;
+	valued_revenue_excl: number;
+	/** Stock-ledger cost, flagged lines excluded. */
+	cogs: number;
+	flagged_lines: number;
+	flagged_cost: number;
+	qty: number;
+	/** ₹, selected tax mode, keyed "YYYY-MM". */
+	monthly: Record<string, number>;
+	/** Distinct invoices. */
+	invoices: number;
+	gp: number;
+	gm_pct: number | null;
+	cost_coverage_pct: number | null;
+	alloc_freight: number;
+	alloc_packaging: number;
+	alloc_commission: number;
+	alloc_scheme: number;
+	alloc_marketing: number;
+	alloc_variable: number;
+	cm2: number;
+	cm2_pct: number | null;
+	cm3: number;
+	cm3_pct: number | null;
+}
+
+export interface SkuAssortmentResponse extends MisEnvelope {
+	intent: IntentFilter;
+	month_keys: string[]; // "YYYY-MM"
+	rows: SkuRow[];
+	totals: {
+		sku_count: number;
+		revenue: number;
+		revenue_excl: number;
+		cogs: number;
+		cogs_unallocated: number;
+		direct_costs: number;
+		/** Σ row gp − cogs_unallocated − direct_costs (= Overview CM1 when intent = all). */
+		gp: number;
+		gm_pct: number | null;
+		qty_by_uom: Record<string, number>;
+		flagged_lines: number;
+		flagged_cost: number;
+	};
+	allocation: {
+		basis: string;
+		freight_pct: number;
+		packaging_pct: number;
+		commission_pct: number;
+		scheme_pct: number;
+		marketing_pct: number;
+		variable_pct: number;
+	};
+}
+
+export interface SegmentTopCustomer {
+	customer: string;
+	customer_name: string;
+	revenue: number;
+	invoices: number;
+}
+
+export interface SegmentTopCategory {
+	category: string;
+	sku_count: number;
+	revenue: number;
+}
+
+export interface CustomerSegment {
+	segment: string;
+	revenue: number;
+	revenue_excl: number;
+	prior_revenue: number;
+	yoy_pct: number | null;
+	customers: number;
+	invoices: number;
+	aov: number | null;
+	avg_customer_value: number | null;
+	cogs: number;
+	gp: number;
+	gm_pct: number | null;
+	gm_coverage_pct: number | null;
+	/** ₹ lakhs, keyed "YYYY-MM". */
+	monthly: Record<string, number>;
+	top_customers: SegmentTopCustomer[];
+	top_categories: SegmentTopCategory[];
+}
+
+export interface CustomerSegmentsResponse extends MisEnvelope {
+	intent: IntentFilter;
+	/** Admin-selected roots from settings. Descendant Customer Groups are rolled up
+	 *  into their selected root before rendering — each root becomes one segment row. */
+	scope_roots: string[];
+	/** True when a customer-group scope or an intent filter applies. */
+	is_scoped: boolean;
+	month_keys: string[];
+	segments: CustomerSegment[];
+	totals: {
+		revenue: number;
+		revenue_excl: number;
+		prior_revenue: number;
+		customers: number;
+		invoices: number;
+		gp: number;
+		gm_pct: number | null;
+		cogs_unallocated: number;
+		gp_after_unallocated: number;
+		gm_pct_after_unallocated: number | null;
+		segment_count: number;
+		aov: number | null;
+	};
+}
+
+/** company_dashboard.api.mis.get_ui_flags */
+export interface UiFlags {
+	coming_soon_tiles: Record<string, boolean>;
+	sections: { mis: boolean; wc: boolean };
 }

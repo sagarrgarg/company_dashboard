@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { KpiTile } from "@/components/widgets/KpiTile";
+import { KpiTile, type KpiAccent } from "@/components/widgets/KpiTile";
 import { MarginTile } from "@/components/widgets/MarginTile";
 import { RevenueTrendChart } from "@/components/widgets/RevenueTrendChart";
 import { RevenueMixChart } from "@/components/widgets/RevenueMixChart";
@@ -7,166 +7,207 @@ import { CategoryTable } from "@/components/widgets/CategoryTable";
 import { TaxModeTabs } from "@/components/widgets/TaxModeTabs";
 import { PeriodPicker } from "@/components/widgets/PeriodPicker";
 import { DownloadButtons } from "@/components/widgets/DownloadButtons";
-import { useOverview } from "@/hooks/useOverview";
 import { PreparedReportHeader } from "@/components/widgets/PreparedReportHeader";
-import { cn, formatDelta, formatINRShort, formatPct } from "@/lib/utils";
-import type { OverviewResponse, PeriodSelection, TaxMode } from "@/types/mis";
-import type { ComingSoonTiles } from "@/App";
+import { DataQualityBanner } from "@/components/widgets/DataQualityBanner";
+import { ErrorCard } from "@/components/widgets/ErrorCard";
+import { useOverview } from "@/hooks/useOverview";
+import { useComingSoon } from "@/hooks/useUiFlags";
+import { stepsLookImpossible } from "@/lib/pnl";
+import {
+	cn,
+	costExceedsRevenue,
+	formatINR,
+	formatMargin,
+	formatNumber,
+	growthDelta,
+	marginState,
+	marginTitle,
+	mixShares,
+	periodShort,
+	PRIOR_INCOMPLETE,
+	type Delta,
+} from "@/lib/utils";
+import type { ComingSoonTiles } from "@/lib/boot";
+import type { MisPageProps } from "@/App";
+import type { OverviewResponse, PnlBucket } from "@/types/mis";
 
-function pctDelta(cur: number, prior: number): number | null {
-	if (!prior) return null;
-	return ((cur - prior) / prior) * 100;
+/** Accent for a margin tile: impossible / n/a values never look green. */
+function marginAccent(pct: number | null, good: number): KpiAccent {
+	if (marginState(pct) !== "ok" || pct == null) return "amber";
+	return pct > good ? "green" : pct > 0 ? "amber" : "red";
 }
 
-interface Props {
-	taxMode: TaxMode;
-	onTaxModeChange: (mode: TaxMode) => void;
-	period: PeriodSelection;
-	onPeriodChange: (next: PeriodSelection) => void;
-	onCompanyResolved?: (company: string) => void;
-	refreshKey: number;
-	onRefreshed: () => void;
-	comingSoon: ComingSoonTiles;
-}
-
-export function OverviewPage({
-	taxMode,
-	onTaxModeChange,
-	period,
-	onPeriodChange,
-	onCompanyResolved,
-	refreshKey,
-	onRefreshed,
-	comingSoon,
-}: Props) {
-	const { data, error, isLoading } = useOverview(taxMode, period, refreshKey);
+export function OverviewPage({ query, onTaxModeChange, onPeriodChange, onLoaded, onRefreshed }: MisPageProps) {
+	const { data, error, isLoading } = useOverview(query);
 	const res = data?.message;
-	const resolvedCompany = res?.company;
+	const comingSoon = useComingSoon();
 
 	useEffect(() => {
-		if (resolvedCompany && onCompanyResolved) {
-			onCompanyResolved(resolvedCompany);
-		}
-	}, [resolvedCompany, onCompanyResolved]);
+		if (res) onLoaded(res.company);
+	}, [res, onLoaded]);
 
-	if (isLoading) {
+	const controls = (
+		<div className="flex items-center gap-2 flex-wrap justify-end">
+			<DownloadButtons taxMode={query.taxMode} period={query.period} company={query.company} />
+			<PeriodPicker value={query.period} onChange={onPeriodChange} company={query.company} />
+			<TaxModeTabs value={query.taxMode} onChange={onTaxModeChange} />
+		</div>
+	);
+
+	if (isLoading && !res) {
 		return (
-			<LoadingShell
-				taxMode={taxMode}
-				onTaxModeChange={onTaxModeChange}
-				period={period}
-				onPeriodChange={onPeriodChange}
-			/>
+			<div className="space-y-4">
+				<div className="flex justify-between items-start">
+					<div className="h-10 w-72 bg-surface-2 rounded animate-pulse" />
+					{controls}
+				</div>
+				<div className="animate-pulse space-y-4">
+					{[0, 1, 2].map((row) => (
+						<div key={row} className="grid grid-cols-5 gap-2.5">
+							{Array.from({ length: 5 }).map((_, i) => (
+								<div key={i} className="h-24 bg-surface-2 rounded-[12px]" />
+							))}
+						</div>
+					))}
+					<div className="h-64 bg-surface-2 rounded-[12px]" />
+				</div>
+			</div>
 		);
 	}
-	if (error || !res) return <ErrorShell message={error?.message ?? "No data"} />;
+	if (error || !res) {
+		return (
+			<>
+				<header className="flex justify-between items-start mb-7 gap-4">
+					<div>
+						<div className="text-[10px] font-semibold tracking-[0.16em] uppercase text-green mb-1">
+							MIS Overview
+						</div>
+						<h1 className="font-serif text-[28px] leading-[1.1] text-text tracking-tight">
+							{query.company || "Overview"}
+						</h1>
+					</div>
+					{controls}
+				</header>
+				<ErrorCard
+					title="Unable to load MIS data"
+					error={error ?? "The server returned no data."}
+					period={query.period}
+					onPeriodChange={onPeriodChange}
+					hint="If ERPNext isn't installed on this site the Overview cannot read Sales Invoice data. Otherwise pick another period or press Refresh."
+				/>
+			</>
+		);
+	}
 
-	return (
-		<OverviewBody
-			res={res}
-			taxMode={taxMode}
-			onTaxModeChange={onTaxModeChange}
-			period={period}
-			onPeriodChange={onPeriodChange}
-			onRefreshed={onRefreshed}
-			comingSoon={comingSoon}
-		/>
-	);
+	return <OverviewBody res={res} controls={controls} onRefreshed={onRefreshed} comingSoon={comingSoon} />;
 }
 
 function OverviewBody({
 	res,
-	taxMode,
-	onTaxModeChange,
-	period,
-	onPeriodChange,
+	controls,
 	onRefreshed,
 	comingSoon,
 }: {
 	res: OverviewResponse;
-	taxMode: TaxMode;
-	onTaxModeChange: (mode: TaxMode) => void;
-	period: PeriodSelection;
-	onPeriodChange: (next: PeriodSelection) => void;
+	controls: React.ReactNode;
 	onRefreshed: () => void;
 	comingSoon: ComingSoonTiles;
 }) {
-	const { kpi, monthly, categories, period: periodInfo } = res;
-	const totalDelta = formatDelta(pctDelta(kpi.total_revenue, kpi.total_revenue_prior));
-	const b2cDelta = formatDelta(pctDelta(kpi.b2c_revenue, kpi.b2c_revenue_prior));
-	const b2bDelta = formatDelta(pctDelta(kpi.b2b_revenue, kpi.b2b_revenue_prior));
-	const mix = kpi.total_revenue
-		? {
-				b2c: Math.round((kpi.b2c_revenue / kpi.total_revenue) * 100),
-				b2b: Math.round((kpi.b2b_revenue / kpi.total_revenue) * 100),
-			}
-		: { b2c: 0, b2b: 0 };
-	const taxLabel = taxMode === "incl" ? "Tax-inclusive" : "Tax-exclusive";
+	const { kpi, monthly, categories, period, ladder_inputs: li, cm2_inputs: c2, cm3_inputs: c3 } = res;
+	const priorOk = period.prior.available && kpi.prior_available !== false;
+	const totalDelta = growthDelta(kpi.total_revenue, kpi.total_revenue_prior, priorOk);
+	const b2cDelta = growthDelta(kpi.b2c_revenue, kpi.b2c_revenue_prior, priorOk);
+	const b2bDelta = growthDelta(kpi.b2b_revenue, kpi.b2b_revenue_prior, priorOk);
+	const uncDelta = growthDelta(kpi.unclassified_revenue, kpi.unclassified_revenue_prior, priorOk);
+	// One rounding for tiles and donut alike.
+	const mix = mixShares(
+		{ b2c: kpi.b2c_revenue, b2b: kpi.b2b_revenue, unclassified: kpi.unclassified_revenue },
+		kpi.total_revenue,
+	);
+	const revBasis = res.basis?.revenue === "incl" ? "incl. tax" : "ex-tax";
+	const revBasisLong = res.basis?.revenue === "incl" ? "Tax-inclusive revenue" : "Tax-exclusive revenue";
+	const inPeriod = periodShort(period);
+	const cmp = period.comparison_label;
+	const cs = comingSoon;
+	/** ₹ amount, or "(soon)" when its tile is flagged "Coming soon" (F8). */
+	const amt = (flag: keyof ComingSoonTiles | null, v: number) => (flag && cs[flag] ? "(soon)" : formatINR(v));
+
+	const buckets: PnlBucket[] = ["overall", "b2c", "b2b", "unclassified"];
+	const impossible = buckets.some((b) => stepsLookImpossible(res.pnl?.[b] ?? []));
+	const costOver = costExceedsRevenue(kpi.cogs, kpi.total_revenue_excl);
+	const uncShareAbs = kpi.total_revenue ? Math.abs(kpi.unclassified_revenue / kpi.total_revenue) : 0;
+
+	const deltaText = (d: Delta) => (d.unavailable ? PRIOR_INCOMPLETE : `${d.label} ${cmp}`);
 
 	return (
 		<>
-			<PreparedReportHeader refreshedAt={res.refreshed_at} section="mis" onRefreshed={onRefreshed} />
+			<PreparedReportHeader
+				refreshedAt={res.refreshed_at}
+				stale={res.stale}
+				section="mis"
+				onRefreshed={onRefreshed}
+			/>
 			<header className="flex justify-between items-start mb-7 gap-4">
 				<div>
 					<div className="text-[10px] font-semibold tracking-[0.16em] uppercase text-green mb-1">
-						MIS Overview · {taxLabel}
+						MIS Overview · {revBasisLong} · margins ex-tax
 					</div>
-					<h1 className="font-serif text-[28px] leading-[1.1] text-text tracking-tight">
-						{res.company}
-					</h1>
+					<h1 className="font-serif text-[28px] leading-[1.1] text-text tracking-tight">{res.company}</h1>
 					<div className="text-[12px] text-text-2 mt-1.5 font-medium">
-						{periodInfo.label} · {categories.length} categories · {kpi.active_skus} live SKUs
+						{period.label} · {categories.length} categories
+						{!cs.active_skus && <> · {formatNumber(kpi.active_skus)} live SKUs</>}
 					</div>
 					<div className="flex gap-1.5 mt-3 flex-wrap">
-						<span className="badge bg-green-bg text-green">
-							B2C {b2cDelta.label} YoY
+						<span className="badge bg-green-bg text-green" title={b2cDelta.unavailable ? PRIOR_INCOMPLETE : cmp}>
+							B2C {b2cDelta.unavailable ? "growth n/a" : `${b2cDelta.label} ${cmp}`}
 						</span>
-						<span className="badge bg-amber-bg text-amber">
-							B2B {b2bDelta.label} YoY
+						<span className="badge bg-amber-bg text-amber" title={b2bDelta.unavailable ? PRIOR_INCOMPLETE : cmp}>
+							B2B {b2bDelta.unavailable ? "growth n/a" : `${b2bDelta.label} ${cmp}`}
 						</span>
-						<span className="badge bg-blue-bg text-blue">
-							GM {formatPct(kpi.gross_margin_pct)}
+						<span className="badge bg-teal-bg text-teal" title={marginTitle(kpi.cm1_pct)}>
+							CM1 · GM {formatMargin(kpi.cm1_pct)}
 						</span>
-						<span className="badge bg-teal-bg text-teal">
-							CM1 {formatPct(kpi.cm1_pct)}
-						</span>
-						<span className="badge bg-purple-bg text-purple">
-							CM2 {formatPct(kpi.cm2_pct)}
+						<span className="badge bg-purple-bg text-purple" title={marginTitle(kpi.cm2_pct)}>
+							CM2 {formatMargin(kpi.cm2_pct)}
 						</span>
 						<span
 							className={cn(
 								"badge",
-								kpi.cm3_pct >= 0
-									? "bg-green-bg text-green"
-									: "bg-red-bg text-red",
+								marginState(kpi.cm3_pct) !== "ok"
+									? "bg-amber-bg text-amber"
+									: (kpi.cm3_pct ?? 0) >= 0
+										? "bg-green-bg text-green"
+										: "bg-red-bg text-red",
 							)}
+							title={marginTitle(kpi.cm3_pct)}
 						>
-							CM3 {formatPct(kpi.cm3_pct)}
+							CM3 {formatMargin(kpi.cm3_pct)}
 						</span>
-						<span
-							className={cn(
-								"badge font-semibold",
-								kpi.pat_pct >= 0
-									? "bg-green-bg text-green"
-									: "bg-red-bg text-red",
-							)}
-						>
-							PAT {formatPct(kpi.pat_pct)}
-						</span>
+						{!cs.pat && (
+							<span
+								className={cn(
+									"badge font-semibold",
+									marginState(kpi.pat_pct) !== "ok"
+										? "bg-amber-bg text-amber"
+										: (kpi.pat_pct ?? 0) >= 0
+											? "bg-green-bg text-green"
+											: "bg-red-bg text-red",
+								)}
+								title={marginTitle(kpi.pat_pct)}
+							>
+								PAT {formatMargin(kpi.pat_pct)}
+							</span>
+						)}
 					</div>
 				</div>
 				<div className="flex flex-col items-end gap-2.5">
-					<div className="flex items-center gap-2 flex-wrap justify-end">
-						<DownloadButtons taxMode={taxMode} period={period} />
-						<PeriodPicker value={period} onChange={onPeriodChange} />
-						<TaxModeTabs value={taxMode} onChange={onTaxModeChange} />
-					</div>
+					{controls}
 					<div className="text-right">
 						<div className="text-[10px] font-semibold tracking-[0.12em] uppercase text-text-3">
-							Total Revenue
+							Total Revenue · {revBasis}
 						</div>
 						<div className="text-[34px] font-semibold text-text leading-[1.05] tracking-tight tabular-nums">
-							{formatINRShort(kpi.total_revenue)}
+							{formatINR(kpi.total_revenue)}
 						</div>
 						<div
 							className={cn(
@@ -177,201 +218,231 @@ function OverviewBody({
 										? "text-red"
 										: "text-text-3",
 							)}
+							title={
+								totalDelta.unavailable
+									? `Data starts ${period.prior.data_starts ?? "—"}; prior window ${period.prior.from} – ${period.prior.to} is ${period.prior.coverage_pct}% covered.`
+									: undefined
+							}
 						>
-							{totalDelta.label} vs prior TTM
+							{deltaText(totalDelta)}
 						</div>
 					</div>
 				</div>
 			</header>
 
-			<div className="sec-label">Revenue KPIs — TTM · {taxLabel}</div>
+			<DataQualityBanner dq={res.data_quality} impossibleMargins={impossible} costOverRevenue={costOver} />
+
+			<div className="sec-label">Revenue — {inPeriod} · {revBasis}</div>
 			<div className="grid grid-cols-5 gap-2.5 mb-2.5">
 				<KpiTile
 					label="Total Revenue"
-					value={formatINRShort(kpi.total_revenue)}
+					basis={revBasis}
+					value={formatINR(kpi.total_revenue)}
 					delta={totalDelta}
-					meta="prior TTM"
+					meta={totalDelta.unavailable ? undefined : cmp}
 				/>
 				<KpiTile
 					label="B2C Revenue"
-					value={formatINRShort(kpi.b2c_revenue)}
+					basis={revBasis}
+					value={formatINR(kpi.b2c_revenue)}
 					accent="green"
 					delta={b2cDelta}
-					meta={`${mix.b2c}% mix`}
+					meta={mix.b2c == null ? undefined : `${mix.b2c}% mix`}
 				/>
 				<KpiTile
 					label="B2B Revenue"
-					value={formatINRShort(kpi.b2b_revenue)}
+					basis={revBasis}
+					value={formatINR(kpi.b2b_revenue)}
 					accent="amber"
 					delta={b2bDelta}
-					meta={`${mix.b2b}% mix`}
+					meta={mix.b2b == null ? undefined : `${mix.b2b}% mix`}
 				/>
 				<KpiTile
-					label="CM1 · Gross Margin"
-					value={formatPct(kpi.cm1_pct)}
-					accent={kpi.cm1_pct > 2 ? "green" : kpi.cm1_pct > 0 ? "amber" : "red"}
-					meta={`(Rev − COGS) · ${Math.round(kpi.gross_margin_coverage_pct)}% valuated`}
+					label="Unclassified Rev"
+					basis={revBasis}
+					value={formatINR(kpi.unclassified_revenue)}
+					accent={uncShareAbs > 0.2 ? "amber" : "default"}
+					delta={uncDelta}
+					meta={mix.unclassified == null ? undefined : `${mix.unclassified}% mix · no sales intent`}
+					comingSoon={cs.unclassified_rev}
 				/>
 				<KpiTile
-					label="CM2 · Before marketing"
-					value={formatPct(kpi.cm2_pct)}
-					accent={kpi.cm2_pct > 2 ? "green" : kpi.cm2_pct > 0 ? "amber" : "red"}
-					meta={`CM1 − ${formatINRShort(kpi.cm2_deduction)} variable`}
+					label="Active SKUs"
+					value={formatNumber(kpi.active_skus)}
+					accent="blue"
+					meta="items with sales"
+					comingSoon={cs.active_skus}
 				/>
 			</div>
 
-			<div className="sec-label mt-5">Profit ladder — TTM · tax-excl</div>
+			<div className="sec-label mt-5">Profit ladder — {inPeriod} · ex-tax</div>
 			<div className="grid grid-cols-5 gap-2.5">
 				<KpiTile
+					label="CM1 · Gross Margin"
+					basis="ex-tax"
+					value={formatMargin(kpi.cm1_pct)}
+					valueTitle={marginTitle(kpi.cm1_pct)}
+					accent={marginAccent(kpi.cm1_pct, 2)}
+					meta={`Rev − cost of goods − direct · ${formatNumber(kpi.gross_margin_coverage_pct)}% valuated`}
+				/>
+				<KpiTile
+					label="CM2 · Before marketing"
+					basis="ex-tax"
+					value={formatMargin(kpi.cm2_pct)}
+					valueTitle={marginTitle(kpi.cm2_pct)}
+					accent={marginAccent(kpi.cm2_pct, 2)}
+					meta={`CM1 − ${formatINR(kpi.cm2_deduction)} variable`}
+				/>
+				<KpiTile
 					label="CM3 · After marketing"
-					value={formatPct(kpi.cm3_pct)}
-					accent={kpi.cm3_pct > 2 ? "green" : kpi.cm3_pct > 0 ? "amber" : "red"}
-					meta={`CM2 − ${formatINRShort(kpi.cm3_deduction)} marketing`}
+					basis="ex-tax"
+					value={formatMargin(kpi.cm3_pct)}
+					valueTitle={marginTitle(kpi.cm3_pct)}
+					accent={marginAccent(kpi.cm3_pct, 2)}
+					meta={`CM2 − ${formatINR(kpi.cm3_deduction)} marketing`}
 				/>
 				<KpiTile
 					label="EBITDA"
-					value={formatPct(kpi.ebitda_pct)}
-					accent={kpi.ebitda_pct > 5 ? "green" : kpi.ebitda_pct > 0 ? "amber" : "red"}
-					meta={`CM3 − ${formatINRShort(res.ladder_inputs.operating_total)} opex`}
-					comingSoon={comingSoon.ebitda}
+					basis="ex-tax"
+					value={formatMargin(kpi.ebitda_pct)}
+					valueTitle={marginTitle(kpi.ebitda_pct)}
+					accent={marginAccent(kpi.ebitda_pct, 5)}
+					meta={
+						cs.operating_opex
+							? "CM3 − operating opex − other − internal (net)"
+							: `CM3 − ${formatINR(li.operating_total)} opex ${signed(li.other_net_total)} other${li.internal_total ? ` ${signed(li.internal_total)} internal` : ""}`
+					}
+					comingSoon={cs.ebitda}
 				/>
 				<KpiTile
 					label="EBIT"
-					value={formatPct(kpi.ebit_pct)}
-					accent={kpi.ebit_pct > 5 ? "green" : kpi.ebit_pct > 0 ? "amber" : "red"}
-					meta={
-						res.ladder_inputs.da_total > 0
-							? `EBITDA − ${formatINRShort(res.ladder_inputs.da_total)} D&A`
-							: "no D&A booked TTM"
-					}
-					comingSoon={comingSoon.ebit}
-				/>
-				<KpiTile
-					label="PAT"
-					value={formatPct(kpi.pat_pct)}
-					accent={kpi.pat_pct > 0 ? "green" : "red"}
-					meta={`− ${formatINRShort(res.ladder_inputs.interest_total)} int · ${formatINRShort(res.ladder_inputs.tax_total)} tax`}
-					comingSoon={comingSoon.pat}
-				/>
-				<KpiTile
-					label="Gross Profit"
-					value={formatINRShort(kpi.gross_profit)}
-					accent={kpi.gross_profit > 0 ? "green" : "red"}
-					meta="abs ₹ · TTM"
-					comingSoon={comingSoon.gross_profit}
+					basis="ex-tax"
+					value={formatMargin(kpi.ebit_pct)}
+					valueTitle={marginTitle(kpi.ebit_pct)}
+					accent={marginAccent(kpi.ebit_pct, 5)}
+					meta={li.da_total > 0 ? `EBITDA − ${formatINR(li.da_total)} D&A` : `no D&A booked in ${inPeriod}`}
+					comingSoon={cs.ebit}
 				/>
 			</div>
 
 			<div className="mt-2.5 grid grid-cols-5 gap-2.5">
 				<KpiTile
-					label="Active SKUs"
-					value={String(kpi.active_skus)}
-					accent="blue"
-					meta="items with sales"
-					comingSoon={comingSoon.active_skus}
+					label="PAT"
+					basis="ex-tax"
+					value={formatMargin(kpi.pat_pct)}
+					valueTitle={marginTitle(kpi.pat_pct)}
+					accent={marginState(kpi.pat_pct) !== "ok" ? "amber" : (kpi.pat_pct ?? 0) > 0 ? "green" : "red"}
+					meta={`${formatINR(kpi.pat)} · − ${amt("interest_finance", li.interest_total)} int · ${amt("income_tax", li.tax_total)} tax`}
+					comingSoon={cs.pat}
 				/>
 				<KpiTile
-					label="Unclassified Rev"
-					value={formatINRShort(kpi.unclassified_revenue)}
-					accent={
-						kpi.unclassified_revenue > kpi.total_revenue * 0.2 ? "amber" : "default"
-					}
-					meta={`${Math.round((kpi.unclassified_revenue / (kpi.total_revenue || 1)) * 100)}% of total`}
-					comingSoon={comingSoon.unclassified_rev}
+					label="Gross Profit"
+					basis="ex-tax"
+					value={formatINR(kpi.gross_profit)}
+					accent={kpi.gross_profit > 0 ? "green" : "red"}
+					meta={`CM1 in ₹ · ${inPeriod}`}
+					comingSoon={cs.gross_profit}
 				/>
 				<KpiTile
 					label="Operating Opex"
-					value={formatINRShort(res.ladder_inputs.operating_total)}
-					meta={`sal ${formatINRShort(res.ladder_inputs.salary_total)} · rent ${formatINRShort(res.ladder_inputs.rent_total)}`}
-					comingSoon={comingSoon.operating_opex}
+					basis="ex-tax"
+					value={formatINR(li.operating_total)}
+					meta={`sal ${formatINR(li.salary_total)} · rent ${formatINR(li.rent_total)}`}
+					comingSoon={cs.operating_opex}
 				/>
 				<KpiTile
 					label="Interest & Finance"
-					value={formatINRShort(res.ladder_inputs.interest_total)}
-					accent={res.ladder_inputs.interest_total > 0 ? "amber" : "default"}
-					meta={`${res.ladder_inputs.interest_accounts.length} account${res.ladder_inputs.interest_accounts.length === 1 ? "" : "s"}`}
-					comingSoon={comingSoon.interest_finance}
+					basis="ex-tax"
+					value={formatINR(li.interest_total)}
+					accent={li.interest_total > 0 ? "amber" : "default"}
+					meta={`${li.interest_accounts.length} account${li.interest_accounts.length === 1 ? "" : "s"}`}
+					comingSoon={cs.interest_finance}
 				/>
 				<KpiTile
 					label="Income Tax"
-					value={formatINRShort(res.ladder_inputs.tax_total)}
+					basis="ex-tax"
+					value={formatINR(li.tax_total)}
 					meta={
-						res.ladder_inputs.tax_total > 0
-							? `${res.ladder_inputs.tax_accounts.length} account${res.ladder_inputs.tax_accounts.length === 1 ? "" : "s"}`
-							: "none TTM (likely losses)"
+						li.tax_total !== 0
+							? `${li.tax_accounts.length} account${li.tax_accounts.length === 1 ? "" : "s"}`
+							: `none booked in ${inPeriod}`
 					}
-					comingSoon={comingSoon.income_tax}
+					comingSoon={cs.income_tax}
 				/>
 			</div>
 
 			<div className="mt-4">
 				<MarginTile
-					overall={{
-						label: "Overall",
-						gpPct: kpi.gross_margin_pct,
-						gp: kpi.gross_profit,
-						coverage: kpi.gross_margin_coverage_pct,
-					}}
-					b2c={{
-						label: "B2C",
-						gpPct: kpi.b2c_gross_margin_pct,
-						gp: kpi.b2c_gross_profit,
-						coverage: kpi.b2c_gross_margin_coverage_pct,
-					}}
-					b2b={{
-						label: "B2B",
-						gpPct: kpi.b2b_gross_margin_pct,
-						gp: kpi.b2b_gross_profit,
-						coverage: kpi.b2b_gross_margin_coverage_pct,
-					}}
+					hideGp={cs.gross_profit}
+					rows={[
+						{
+							label: "Overall",
+							gpPct: kpi.gross_margin_pct,
+							gp: kpi.gross_profit,
+							coverage: kpi.gross_margin_coverage_pct,
+						},
+						{
+							label: "B2C",
+							gpPct: kpi.b2c_gross_margin_pct,
+							gp: kpi.b2c_gross_profit,
+							coverage: kpi.b2c_gross_margin_coverage_pct,
+						},
+						{
+							label: "B2B",
+							gpPct: kpi.b2b_gross_margin_pct,
+							gp: kpi.b2b_gross_profit,
+							coverage: kpi.b2b_gross_margin_coverage_pct,
+						},
+						{
+							label: "Unclassified",
+							gpPct: kpi.unclassified_gross_margin_pct,
+							gp: kpi.unclassified_gross_profit,
+							coverage: kpi.unclassified_gross_margin_coverage_pct,
+							hidden: cs.unclassified_rev,
+						},
+					]}
 				/>
 			</div>
 
 			<div className="mt-3 text-[10.5px] text-text-3 leading-[1.7]">
 				<div>
-					<span className="font-semibold text-text-2">CM1 (GM):</span> Revenue − COGS ·
-					computed from Sales Invoice Item × incoming_rate (no account config)
+					<span className="font-semibold text-text-2">CM1 (GM):</span> ex-tax revenue − cost of goods{" "}
+					{formatINR(li.cogs_total)} (GL: {li.cogs_accounts.map((a) => a.account).join(", ") || "no accounts"}) −
+					direct costs {formatINR(li.direct_total)} · splits use each line's stock-ledger cost (
+					{formatINR(li.cogs_allocated)}); the GL − stock-ledger difference of{" "}
+					{formatINR(li.cogs_unallocated)} is unallocated cost of goods — shared by revenue across B2C /
+					B2B / unclassified here, shown as its own line on the SKU and segment pages
 				</div>
 				<div>
-					<span className="font-semibold text-text-2">CM2:</span> freight{" "}
-					{formatINRShort(res.cm2_inputs.freight_total)} ·{" "}
-					{res.cm2_inputs.freight_accounts.length} acc · packaging{" "}
-					{formatINRShort(res.cm2_inputs.packaging_total)} ·{" "}
-					{res.cm2_inputs.packaging_accounts.length} acc · txn fees{" "}
-					{formatINRShort(res.cm2_inputs.commission_total)} ·{" "}
-					{res.cm2_inputs.commission_accounts.length} acc · schemes{" "}
-					{formatINRShort(res.cm2_inputs.scheme_total)} ·{" "}
-					{res.cm2_inputs.scheme_accounts.length} acc
+					<span className="font-semibold text-text-2">CM2:</span> freight {formatINR(c2.freight_total)} ·{" "}
+					{c2.freight_accounts.length} acc · packaging {formatINR(c2.packaging_total)} ·{" "}
+					{c2.packaging_accounts.length} acc · txn fees {formatINR(c2.commission_total)} ·{" "}
+					{c2.commission_accounts.length} acc · schemes {formatINR(c2.scheme_total)} ·{" "}
+					{c2.scheme_accounts.length} acc
 				</div>
 				<div>
-					<span className="font-semibold text-text-2">CM3:</span> marketing{" "}
-					{formatINRShort(res.cm3_inputs.marketing_total)} ·{" "}
-					{res.cm3_inputs.marketing_accounts.length} acc
+					<span className="font-semibold text-text-2">CM3:</span> marketing {formatINR(c3.marketing_total)} ·{" "}
+					{c3.marketing_accounts.length} acc
 				</div>
 				<div>
 					<span className="font-semibold text-text-2">EBITDA:</span> salary{" "}
-					{formatINRShort(res.ladder_inputs.salary_total)} ·{" "}
-					{res.ladder_inputs.salary_accounts.length} acc · rent{" "}
-					{formatINRShort(res.ladder_inputs.rent_total)} ·{" "}
-					{res.ladder_inputs.rent_accounts.length} acc · utilities{" "}
-					{formatINRShort(res.ladder_inputs.utility_total)} ·{" "}
-					{res.ladder_inputs.utility_accounts.length} acc · admin{" "}
-					{formatINRShort(res.ladder_inputs.admin_total)} ·{" "}
-					{res.ladder_inputs.admin_accounts.length} acc
+					{amt("operating_opex", li.salary_total)} · {li.salary_accounts.length} acc · rent{" "}
+					{amt("operating_opex", li.rent_total)} · {li.rent_accounts.length} acc · utilities{" "}
+					{amt("operating_opex", li.utility_total)} · {li.utility_accounts.length} acc · admin{" "}
+					{amt("operating_opex", li.admin_total)} · {li.admin_accounts.length} acc · other expenses less
+					other income {formatINR(li.other_net_total)} ({li.unmapped_expense_accounts.length} unmapped
+					expense, {li.other_income_accounts.length} income acc) · internal transfers (net){" "}
+					{formatINR(li.internal_total)} · {(li.internal_accounts ?? []).length} acc
 				</div>
 				<div>
-					<span className="font-semibold text-text-2">EBIT/PAT:</span> D&A{" "}
-					{formatINRShort(res.ladder_inputs.da_total)} ·{" "}
-					{res.ladder_inputs.da_accounts.length} acc · interest{" "}
-					{formatINRShort(res.ladder_inputs.interest_total)} ·{" "}
-					{res.ladder_inputs.interest_accounts.length} acc · tax{" "}
-					{formatINRShort(res.ladder_inputs.tax_total)} ·{" "}
-					{res.ladder_inputs.tax_accounts.length} acc
+					<span className="font-semibold text-text-2">EBIT/PAT:</span> D&A {formatINR(li.da_total)} ·{" "}
+					{li.da_accounts.length} acc · interest {amt("interest_finance", li.interest_total)} ·{" "}
+					{li.interest_accounts.length} acc · tax {amt("income_tax", li.tax_total)} · {li.tax_accounts.length}{" "}
+					acc{!cs.pat && <> · PAT ties to GL net profit {formatINR(li.gl_net_profit)}</>}
 				</div>
 				<div>
-					<span className="font-semibold text-text-2">Basis:</span>{" "}
-					{res.cm2_inputs.allocation_basis} · scope {res.cm2_inputs.company_scope} · edit
-					in{" "}
+					<span className="font-semibold text-text-2">Basis:</span> {c2.allocation_basis} · scope{" "}
+					{c2.company_scope} · edit in{" "}
 					<a
 						href="/app/company-dashboard-settings"
 						className="text-green font-medium underline-offset-2 hover:underline"
@@ -382,20 +453,17 @@ function OverviewBody({
 				</div>
 			</div>
 
-			{kpi.unclassified_revenue > kpi.total_revenue * 0.1 && (
+			{!cs.unclassified_rev && uncShareAbs > 0.1 && (
 				<div className="mt-4 px-4 py-3 rounded-lg bg-amber-bg border border-amber/20 text-amber text-[12px] leading-relaxed flex items-start gap-2.5">
 					<span className="mt-0.5 shrink-0 w-4 h-4 rounded-full bg-amber text-white text-[10px] font-bold flex items-center justify-center">
 						!
 					</span>
 					<div>
 						<strong className="font-semibold">Heads up: </strong>
-						{formatINRShort(kpi.unclassified_revenue)} (
-						{Math.round((kpi.unclassified_revenue / (kpi.total_revenue || 1)) * 100)}%) of
-						revenue is on items without a{" "}
-						<code className="px-1 py-0.5 rounded bg-amber/10 text-[11px]">
-							custom_sales_intent
-						</code>{" "}
-						set. Fill those in on the Item form to tighten the B2C/B2B split.
+						{formatINR(kpi.unclassified_revenue)} ({mix.unclassified ?? "—"}%) of revenue is on items
+						without a{" "}
+						<code className="px-1 py-0.5 rounded bg-amber/10 text-[11px]">custom_sales_intent</code> set.
+						Fill those in on the Item form to tighten the B2C/B2B split.
 					</div>
 				</div>
 			)}
@@ -406,7 +474,7 @@ function OverviewBody({
 						<div>
 							<div className="card-title mb-0.5">Monthly revenue</div>
 							<div className="text-[11px] text-text-3 font-medium">
-								B2C vs B2B · ₹L · {taxLabel}
+								B2C · B2B · unclassified · ₹ · {revBasisLong}
 							</div>
 						</div>
 						<span className="badge bg-green-bg text-green font-semibold">
@@ -415,21 +483,33 @@ function OverviewBody({
 						</span>
 					</div>
 					{monthly.length === 0 ? (
-						<EmptyState message="No Sales Invoice data in the trailing 12 months." />
+						<EmptyState message="No Sales Invoice data in this period." />
 					) : (
-						<RevenueTrendChart data={monthly} />
+						<RevenueTrendChart data={monthly} hideUnclassified={cs.unclassified_rev} />
 					)}
 				</div>
 				<div className="flex flex-col gap-4">
 					<div className="card flex-1">
-						<div className="card-title">Revenue mix</div>
-						<RevenueMixChart b2c={kpi.b2c_revenue} b2b={kpi.b2b_revenue} />
+						<div className="card-title">Revenue mix · {revBasis}</div>
+						<RevenueMixChart
+							slices={[
+								{ name: "B2C", value: kpi.b2c_revenue, share: mix.b2c, color: "#1F5F33" },
+								{ name: "B2B", value: kpi.b2b_revenue, share: mix.b2b, color: "#96560F" },
+								{
+									name: "Unclassified",
+									value: kpi.unclassified_revenue,
+									share: mix.unclassified,
+									color: "#9E9382",
+									hidden: cs.unclassified_rev,
+								},
+							]}
+						/>
 					</div>
 					<div className="card flex-1">
 						<div className="flex items-center justify-between mb-3">
 							<div className="card-title mb-0">Revenue by category</div>
 							<span className="text-[9.5px] tracking-[0.1em] uppercase text-text-3 font-medium">
-								Top 10 + Other
+								Top 10 + Other · {revBasis}
 							</span>
 						</div>
 						{categories.length === 0 ? (
@@ -444,58 +524,13 @@ function OverviewBody({
 	);
 }
 
-function LoadingShell({
-	taxMode,
-	onTaxModeChange,
-	period,
-	onPeriodChange,
-}: {
-	taxMode: TaxMode;
-	onTaxModeChange: (mode: TaxMode) => void;
-	period: PeriodSelection;
-	onPeriodChange: (next: PeriodSelection) => void;
-}) {
-	return (
-		<div className="animate-pulse space-y-4">
-			<div className="flex justify-between items-start">
-				<div className="h-10 w-72 bg-surface-2 rounded" />
-				<div className="flex items-center gap-2">
-					<PeriodPicker value={period} onChange={onPeriodChange} />
-					<TaxModeTabs value={taxMode} onChange={onTaxModeChange} />
-				</div>
-			</div>
-			<div className="grid grid-cols-5 gap-2.5">
-				{Array.from({ length: 5 }).map((_, i) => (
-					<div key={i} className="h-24 bg-surface-2 rounded-[12px]" />
-				))}
-			</div>
-			<div className="grid grid-cols-5 gap-2.5">
-				{Array.from({ length: 5 }).map((_, i) => (
-					<div key={i} className="h-24 bg-surface-2 rounded-[12px]" />
-				))}
-			</div>
-			<div className="h-64 bg-surface-2 rounded-[12px]" />
-		</div>
-	);
-}
-
-function ErrorShell({ message }: { message: string }) {
-	return (
-		<div className="card">
-			<div className="card-title text-red">Unable to load MIS data</div>
-			<p className="text-[12px] text-text-2">{message}</p>
-			<p className="text-[12px] text-text-3 mt-3">
-				If ERPNext isn't installed on this site, the Overview cannot resolve Sales Invoice
-				data. Install ERPNext or switch to a site that has it, then reload.
-			</p>
-		</div>
-	);
+/** A deduction in a "CM3 − x − y" sentence: "− ₹1.22 Cr", or "+ ₹1.20 Cr" for a net credit. */
+function signed(deduction: number): string {
+	return `${deduction < 0 ? "+" : "−"} ${formatINR(Math.abs(deduction))}`;
 }
 
 function EmptyState({ message }: { message: string }) {
 	return (
-		<div className="h-[140px] flex items-center justify-center text-[12px] text-text-3">
-			{message}
-		</div>
+		<div className="h-[140px] flex items-center justify-center text-[12px] text-text-3">{message}</div>
 	);
 }

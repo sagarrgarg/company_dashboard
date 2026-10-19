@@ -9,47 +9,27 @@ import type {
 
 const SWR_OPTS = { revalidateOnFocus: false, dedupingInterval: 60_000 };
 
-export function useWcOverview(refreshKey = 0) {
-	return useFrappeGetCall<{ message: WcOverview }>(
-		"company_dashboard.api.wc.get_wc_overview",
-		{},
-		`wc.overview::${refreshKey}`,
+/** All five WC endpoints read one server snapshot, keyed by company. */
+function useWcCall<T>(method: string, company: string, refreshKey: number) {
+	return useFrappeGetCall<{ message: T }>(
+		`company_dashboard.api.wc.${method}`,
+		company ? { company } : {},
+		`wc.${method}::${company || "-"}::${refreshKey}`,
 		SWR_OPTS,
 	);
 }
 
-export function useBankDetail(refreshKey = 0) {
-	return useFrappeGetCall<{ message: BankDetail }>(
-		"company_dashboard.api.wc.get_bank_detail",
-		{},
-		`wc.bank_detail::${refreshKey}`,
-		SWR_OPTS,
-	);
-}
+export const useWcOverview = (company: string, refreshKey = 0) =>
+	useWcCall<WcOverview>("get_wc_overview", company, refreshKey);
 
-export function useTradeReceivable(refreshKey = 0) {
-	return useFrappeGetCall<{ message: TradeReceivable }>(
-		"company_dashboard.api.wc.get_trade_receivable",
-		{},
-		`wc.trade_receivable::${refreshKey}`,
-		SWR_OPTS,
-	);
-}
+export const useBankDetail = (company: string, refreshKey = 0) =>
+	useWcCall<BankDetail>("get_bank_detail", company, refreshKey);
 
-export function useTradePayable(refreshKey = 0) {
-	return useFrappeGetCall<{ message: TradePayable }>(
-		"company_dashboard.api.wc.get_trade_payable",
-		{},
-		`wc.trade_payable::${refreshKey}`,
-		SWR_OPTS,
-	);
-}
+export const useTradeReceivable = (company: string, refreshKey = 0) =>
+	useWcCall<TradeReceivable>("get_trade_receivable", company, refreshKey);
 
-export function useStockDetail(refreshKey = 0) {
-	return useFrappeGetCall<{ message: StockDetail }>(
-		"company_dashboard.api.wc.get_stock_detail",
-		{},
-		`wc.stock_detail::${refreshKey}`,
-		SWR_OPTS,
-	);
-}
+export const useTradePayable = (company: string, refreshKey = 0) =>
+	useWcCall<TradePayable>("get_trade_payable", company, refreshKey);
+
+export const useStockDetail = (company: string, refreshKey = 0) =>
+	useWcCall<StockDetail>("get_stock_detail", company, refreshKey);

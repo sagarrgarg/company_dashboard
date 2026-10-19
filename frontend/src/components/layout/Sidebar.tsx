@@ -1,6 +1,8 @@
 import { NavLink } from "react-router-dom";
-import { cn } from "@/lib/utils";
-import type { DashboardSections } from "@/App";
+import { cn, describePeriod } from "@/lib/utils";
+import { useCompanies } from "@/hooks/useOverview";
+import type { DashboardSections } from "@/lib/boot";
+import type { PeriodSelection } from "@/types/mis";
 
 interface NavItem {
 	to: string;
@@ -132,13 +134,19 @@ const ITEMS: NavItem[] = [
 ];
 
 interface SidebarProps {
+	/** Resolved company name (shown as the brand). */
 	company?: string;
-	period?: string;
+	/** Company sent to the API ("" = server default). */
+	selectedCompany: string;
+	onCompanyChange: (company: string) => void;
+	period: PeriodSelection;
 	sections: DashboardSections;
 }
 
-export function Sidebar({ company, period, sections }: SidebarProps) {
+export function Sidebar({ company, selectedCompany, onCompanyChange, period, sections }: SidebarProps) {
 	const brand = company?.trim() || "Biz Dashboard";
+	const { data: companiesData } = useCompanies();
+	const companies = companiesData?.message ?? [];
 	const visible = ITEMS.filter((it) => sections[it.section]);
 	const groups = visible.reduce<Record<string, NavItem[]>>((acc, it) => {
 		(acc[it.group] ??= []).push(it);
@@ -162,6 +170,28 @@ export function Sidebar({ company, period, sections }: SidebarProps) {
 			>
 				Biz Dashboard
 			</div>
+
+			{companies.length > 1 && (
+				<label className="block -mt-4 mb-5">
+					<span className="sr-only">Company</span>
+					<select
+						value={selectedCompany || company || ""}
+						onChange={(e) => onCompanyChange(e.target.value)}
+						className="w-full px-2 py-1.5 text-[12px] rounded-md bg-transparent border"
+						style={{
+							color: "var(--sidebar-text)",
+							borderColor: "var(--sidebar-divider)",
+						}}
+						aria-label="Company"
+					>
+						{companies.map((c) => (
+							<option key={c} value={c} style={{ color: "#1a1810" }}>
+								{c}
+							</option>
+						))}
+					</select>
+				</label>
+			)}
 
 			{Object.entries(groups).map(([group, items]) => (
 				<div key={group}>
@@ -212,7 +242,7 @@ export function Sidebar({ company, period, sections }: SidebarProps) {
 					className="text-[10px] leading-[1.7]"
 					style={{ color: "var(--sidebar-text-muted)" }}
 				>
-					{period ?? "Trailing 12 months"}
+					{describePeriod(period)}
 					<br />
 					Company Dashboard · Frappe
 				</div>

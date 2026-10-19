@@ -1,184 +1,105 @@
-import type { KPI, OverviewResponse } from "@/types/mis";
+import type { ComingSoonKey, ComingSoonTiles } from "@/lib/boot";
+import { costExceedsRevenue, formatINR, marginState } from "@/lib/utils";
+import type { ApiPnlStep, OverviewResponse, PnlBucket, PnlStepKey } from "@/types/mis";
 
-export type PnlBucket = "overall" | "b2c" | "b2b";
+export type { PnlBucket };
 
-export interface PnlStep {
-	/** Stable key — used as React key and accent class anchor. */
-	key: string;
-	/** Label shown on the chart x-axis and the table. */
-	label: string;
-	/** Indentation level for the table (0 = header, 1 = sub-line). */
+export interface PnlStep extends ApiPnlStep {
+	/** 0 = anchor / tier row, 1 = deduction sub-line. */
 	indent: 0 | 1;
-	/** Absolute ₹ amount. Positive = subtotal/tier end; negative = deduction from prior subtotal. */
-	amount: number;
-	/** Running subtotal AFTER this step — lets the chart draw the waterfall without recomputation. */
-	subtotal: number;
-	/** Role of the step in the waterfall — drives colour + indentation. */
-	kind: "anchor" | "deduction" | "tier";
-	/** Optional account-count or sub-breakdown for the table "details" column. */
-	note?: string;
+	/** Hidden by a "Coming soon" flag (amount and %). */
+	hidden: boolean;
+	/** Only the ₹ amount is hidden (Gross Profit flag on CM1). */
+	amountHidden: boolean;
+	/** Accounts behind the line, for the row tooltip. */
+	accounts: string[];
 }
 
-/** Build a per-bucket P&L waterfall from the Overview response.
- *
- *  Revenue → (−COGS) → CM1 → (−variable) → CM2 → (−marketing) → CM3
- *          → (−operating) → EBITDA → (−D&A) → EBIT → (−interest) → PBT → (−tax) → PAT
- */
-export function buildPnlSteps(res: OverviewResponse, bucket: PnlBucket): PnlStep[] {
-	const { kpi, cm2_inputs: c2, cm3_inputs: c3, ladder_inputs: li } = res;
+/** "Coming soon" flag that hides each P&L line — the same figure as the Overview tile. */
+export const STEP_FLAG: Partial<Record<PnlStepKey, ComingSoonKey>> = {
+	ebitda: "ebitda",
+	ebit: "ebit",
+	pat: "pat",
+	salary: "operating_opex",
+	rent: "operating_opex",
+	utility: "operating_opex",
+	admin: "operating_opex",
+	interest: "interest_finance",
+	tax: "income_tax",
+};
 
-	// Revenue and tier values vary by bucket. COGS, variable, marketing etc. are aggregate
-	// totals at the company level; per-bucket values are revenue-share-allocated (the same
-	// caveat documented in the MIS API). We use the `share` ratio to split them here so the
-	// waterfall numbers line up to the per-bucket tier subtotals that the API already returns.
-	const revenue = revenueOf(kpi, bucket);
-	const cm1 = valueOf(kpi, bucket, "cm1");
-	const cm2 = valueOf(kpi, bucket, "cm2");
-	const cm3 = valueOf(kpi, bucket, "cm3");
-	const ebitda = valueOf(kpi, bucket, "ebitda");
-	const ebit = valueOf(kpi, bucket, "ebit");
-	const pbt = bucket === "overall" ? kpi.pbt : undefined;
-	const pat = valueOf(kpi, bucket, "pat");
-
-	// Per-bucket deductions via share of revenue (aggregate numbers divided proportionally).
-	const totalRev = kpi.total_revenue || 1;
-	const share = bucket === "overall" ? 1 : revenue / totalRev;
-
-	const cogs = revenue - cm1; // GP already tells us COGS
-	const variable = c2.variable_total * share;
-	const marketing = c3.marketing_total * share;
-	const operating = li.operating_total * share;
-	const da = li.da_total * share;
-	const interest = li.interest_total * share;
-	const tax = li.tax_total * share;
-
-	const steps: PnlStep[] = [
-		{ key: "rev", label: "Gross Revenue", indent: 0, kind: "anchor", amount: revenue, subtotal: revenue },
-		{
-			key: "cogs",
-			label: "COGS (incoming_rate × qty)",
-			indent: 1,
-			kind: "deduction",
-			amount: -cogs,
-			subtotal: cm1,
-			note: "includes primary packaging via BOM",
-		},
-		{ key: "cm1", label: "CM1 · Gross Margin", indent: 0, kind: "tier", amount: cm1, subtotal: cm1 },
-
-		{
-			key: "variable",
-			label: "Variable fulfillment",
-			indent: 1,
-			kind: "deduction",
-			amount: -variable,
-			subtotal: cm2,
-			note: variableNote(c2),
-		},
-		{ key: "cm2", label: "CM2 · Before marketing", indent: 0, kind: "tier", amount: cm2, subtotal: cm2 },
-
-		{
-			key: "marketing",
-			label: "Marketing",
-			indent: 1,
-			kind: "deduction",
-			amount: -marketing,
-			subtotal: cm3,
-			note: `${c3.marketing_accounts.length} account${c3.marketing_accounts.length === 1 ? "" : "s"}`,
-		},
-		{ key: "cm3", label: "CM3 · After marketing", indent: 0, kind: "tier", amount: cm3, subtotal: cm3 },
-
-		{
-			key: "operating",
-			label: "Operating overhead",
-			indent: 1,
-			kind: "deduction",
-			amount: -operating,
-			subtotal: ebitda,
-			note: operatingNote(li),
-		},
-		{ key: "ebitda", label: "EBITDA", indent: 0, kind: "tier", amount: ebitda, subtotal: ebitda },
-
-		{
-			key: "da",
-			label: "Depreciation & Amortization",
-			indent: 1,
-			kind: "deduction",
-			amount: -da,
-			subtotal: ebit,
-			note:
-				li.da_accounts.length > 0
-					? `${li.da_accounts.length} account${li.da_accounts.length === 1 ? "" : "s"}`
-					: "none booked TTM",
-		},
-		{ key: "ebit", label: "EBIT", indent: 0, kind: "tier", amount: ebit, subtotal: ebit },
-
-		{
-			key: "interest",
-			label: "Interest & Finance",
-			indent: 1,
-			kind: "deduction",
-			amount: -interest,
-			subtotal: pbt ?? ebit - interest,
-			note: `${li.interest_accounts.length} account${li.interest_accounts.length === 1 ? "" : "s"}`,
-		},
-		{
-			key: "pbt",
-			label: "PBT · Profit Before Tax",
-			indent: 0,
-			kind: "tier",
-			amount: pbt ?? ebit - interest,
-			subtotal: pbt ?? ebit - interest,
-		},
-
-		{
-			key: "tax",
-			label: "Income Tax",
-			indent: 1,
-			kind: "deduction",
-			amount: -tax,
-			subtotal: pat,
-			note:
-				li.tax_accounts.length === 0
-					? "no tax accounts configured"
-					: tax > 0
-						? `${li.tax_accounts.length} account${li.tax_accounts.length === 1 ? "" : "s"}`
-						: "none TTM (likely losses)",
-		},
-		{ key: "pat", label: "PAT · Profit After Tax", indent: 0, kind: "tier", amount: pat, subtotal: pat },
-	];
-
-	return steps;
+export function bucketHidden(bucket: PnlBucket, flags: ComingSoonTiles): boolean {
+	return bucket === "unclassified" && flags.unclassified_rev;
 }
 
-function revenueOf(kpi: KPI, bucket: PnlBucket): number {
-	if (bucket === "b2c") return kpi.b2c_revenue;
-	if (bucket === "b2b") return kpi.b2b_revenue;
-	return kpi.total_revenue;
+function accountsFor(res: OverviewResponse, key: PnlStepKey): string[] {
+	const li = res.ladder_inputs;
+	const c2 = res.cm2_inputs;
+	const withAmt = (rows: { account: string; amount: number }[]) =>
+		rows.map((r) => `${r.account}: ${formatINR(r.amount)}`);
+	switch (key) {
+		case "cogs":
+			return withAmt(li.cogs_accounts ?? []);
+		case "direct":
+			return li.direct_accounts ?? [];
+		case "freight":
+			return c2.freight_accounts;
+		case "packaging":
+			return c2.packaging_accounts;
+		case "commission":
+			return c2.commission_accounts;
+		case "scheme":
+			return c2.scheme_accounts;
+		case "marketing":
+			return res.cm3_inputs.marketing_accounts;
+		case "salary":
+			return li.salary_accounts;
+		case "rent":
+			return li.rent_accounts;
+		case "utility":
+			return li.utility_accounts;
+		case "admin":
+			return li.admin_accounts;
+		case "other":
+			return [
+				...withAmt(li.unmapped_expense_accounts ?? []),
+				...(li.other_income_accounts ?? []).map((r) => `${r.account} (income): ${formatINR(r.amount)}`),
+			];
+		case "internal":
+			return withAmt(li.internal_accounts ?? []);
+		case "da":
+			return li.da_accounts;
+		case "interest":
+			return li.interest_accounts;
+		case "tax":
+			return li.tax_accounts;
+		default:
+			return [];
+	}
 }
 
-type Tier = "cm1" | "cm2" | "cm3" | "ebitda" | "ebit" | "pat";
-
-function valueOf(kpi: KPI, bucket: PnlBucket, tier: Tier): number {
-	const prefix = bucket === "overall" ? "" : `${bucket}_`;
-	const field = `${prefix}${tier}` as keyof KPI;
-	const raw = kpi[field];
-	return typeof raw === "number" ? raw : 0;
+/** The P&L ladder for one bucket, straight from the API (`res.pnl[bucket]`, ex-tax, ties
+ *  to GL net profit). No figures are derived here. */
+export function buildPnlSteps(res: OverviewResponse, bucket: PnlBucket, flags: ComingSoonTiles): PnlStep[] {
+	const steps = res.pnl?.[bucket] ?? [];
+	return steps.map((s) => {
+		const flag = STEP_FLAG[s.key];
+		return {
+			...s,
+			indent: s.kind === "deduction" ? 1 : 0,
+			hidden: Boolean(flag && flags[flag]),
+			amountHidden: s.key === "cm1" && flags.gross_profit,
+			accounts: accountsFor(res, s.key),
+		};
+	});
 }
 
-function variableNote(c2: OverviewResponse["cm2_inputs"]): string {
-	const parts: string[] = [];
-	if (c2.freight_accounts.length) parts.push(`${c2.freight_accounts.length} freight`);
-	if (c2.packaging_accounts.length) parts.push(`${c2.packaging_accounts.length} pkg`);
-	if (c2.commission_accounts.length) parts.push(`${c2.commission_accounts.length} txn`);
-	if (c2.scheme_accounts.length) parts.push(`${c2.scheme_accounts.length} scheme`);
-	return parts.join(" · ");
-}
-
-function operatingNote(li: OverviewResponse["ladder_inputs"]): string {
-	const parts: string[] = [];
-	if (li.salary_accounts.length) parts.push(`${li.salary_accounts.length} salary`);
-	if (li.rent_accounts.length) parts.push(`${li.rent_accounts.length} rent`);
-	if (li.utility_accounts.length) parts.push(`${li.utility_accounts.length} util`);
-	if (li.admin_accounts.length) parts.push(`${li.admin_accounts.length} admin`);
-	return parts.join(" · ");
+/** True when a tier margin is beyond ±100% or cost of goods is above 2× revenue. */
+export function stepsLookImpossible(steps: ApiPnlStep[]): boolean {
+	const revenue = steps.find((s) => s.key === "revenue")?.amount ?? 0;
+	return steps.some(
+		(s) =>
+			(s.kind === "tier" && marginState(s.pct) === "bogus") ||
+			(s.key === "cogs" && costExceedsRevenue(s.amount, revenue)),
+	);
 }

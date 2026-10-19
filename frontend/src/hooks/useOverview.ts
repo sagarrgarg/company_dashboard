@@ -1,6 +1,7 @@
 import { useFrappeGetCall } from "frappe-react-sdk";
 import type {
 	CustomerSegmentsResponse,
+	FiscalYear,
 	IntentFilter,
 	OverviewResponse,
 	PeriodSelection,
@@ -8,69 +9,77 @@ import type {
 	TaxMode,
 } from "@/types/mis";
 
-export function useOverview(taxMode: TaxMode, period: PeriodSelection, refreshKey = 0) {
-	const params: Record<string, string> = { tax_mode: taxMode };
-	if (period.kind !== "ttm") {
-		params.from_date = period.from;
-		params.to_date = period.to;
+/** Filters shared by every MIS page. `company` "" = let the server pick its default. */
+export interface MisQuery {
+	taxMode: TaxMode;
+	period: PeriodSelection;
+	company: string;
+	refreshKey: number;
+}
+
+const SWR_OPTS = { revalidateOnFocus: false, dedupingInterval: 60_000 };
+
+function baseParams(q: MisQuery): Record<string, string> {
+	const params: Record<string, string> = { tax_mode: q.taxMode };
+	if (q.period.kind !== "ttm") {
+		params.from_date = q.period.from;
+		params.to_date = q.period.to;
 	}
-	const key = periodKey(period);
+	if (q.company) params.company = q.company;
+	return params;
+}
+
+function baseKey(q: MisQuery): string {
+	return `${q.company || "-"}::${q.taxMode}::${periodKey(q.period)}::${q.refreshKey}`;
+}
+
+export function useOverview(q: MisQuery) {
 	return useFrappeGetCall<{ message: OverviewResponse }>(
 		"company_dashboard.api.mis.get_overview",
-		params,
-		`mis.get_overview::${taxMode}::${key}::${refreshKey}`,
-		{ revalidateOnFocus: false, dedupingInterval: 60_000 },
+		baseParams(q),
+		`mis.get_overview::${baseKey(q)}`,
+		SWR_OPTS,
 	);
 }
 
-export function useFiscalYears() {
-	return useFrappeGetCall<{
-		message: Array<{ name: string; from: string; to: string }>;
-	}>(
+export function useFiscalYears(company: string) {
+	return useFrappeGetCall<{ message: FiscalYear[] }>(
 		"company_dashboard.api.mis.get_fiscal_years",
-		{},
-		"mis.fiscal_years",
+		company ? { company } : {},
+		`mis.fiscal_years::${company || "-"}`,
 		{ revalidateOnFocus: false, dedupingInterval: 5 * 60_000 },
 	);
 }
 
-export function useSkuAssortment(taxMode: TaxMode, period: PeriodSelection, intent: IntentFilter, refreshKey = 0) {
-	const params: Record<string, string> = { tax_mode: taxMode, intent };
-	if (period.kind !== "ttm") {
-		params.from_date = period.from;
-		params.to_date = period.to;
-	}
-	const key = `${periodKey(period)}::${intent}`;
-	return useFrappeGetCall<{ message: SkuAssortmentResponse }>(
-		"company_dashboard.api.mis.get_sku_assortment",
-		params,
-		`mis.get_sku_assortment::${taxMode}::${key}::${refreshKey}`,
-		{ revalidateOnFocus: false, dedupingInterval: 60_000 },
+export function useCompanies() {
+	return useFrappeGetCall<{ message: string[] }>(
+		"company_dashboard.api.mis.get_companies",
+		{},
+		"mis.companies",
+		{ revalidateOnFocus: false, dedupingInterval: 5 * 60_000 },
 	);
 }
 
-export function useCustomerSegments(
-	taxMode: TaxMode,
-	period: PeriodSelection,
-	intent: IntentFilter,
-	refreshKey = 0,
-) {
-	const params: Record<string, string> = { tax_mode: taxMode, intent };
-	if (period.kind !== "ttm") {
-		params.from_date = period.from;
-		params.to_date = period.to;
-	}
-	const key = `${periodKey(period)}::${intent}`;
+export function useSkuAssortment(q: MisQuery, intent: IntentFilter) {
+	return useFrappeGetCall<{ message: SkuAssortmentResponse }>(
+		"company_dashboard.api.mis.get_sku_assortment",
+		{ ...baseParams(q), intent },
+		`mis.get_sku_assortment::${baseKey(q)}::${intent}`,
+		SWR_OPTS,
+	);
+}
+
+export function useCustomerSegments(q: MisQuery, intent: IntentFilter) {
 	return useFrappeGetCall<{ message: CustomerSegmentsResponse }>(
 		"company_dashboard.api.mis.get_customer_segments",
-		params,
-		`mis.get_customer_segments::${taxMode}::${key}::${refreshKey}`,
-		{ revalidateOnFocus: false, dedupingInterval: 60_000 },
+		{ ...baseParams(q), intent },
+		`mis.get_customer_segments::${baseKey(q)}::${intent}`,
+		SWR_OPTS,
 	);
 }
 
 function periodKey(p: PeriodSelection): string {
 	if (p.kind === "ttm") return "ttm";
-	if (p.kind === "fy") return `fy:${p.name}`;
+	if (p.kind === "fy") return `fy:${p.name}:${p.from}:${p.to}`;
 	return `custom:${p.from}:${p.to}`;
 }

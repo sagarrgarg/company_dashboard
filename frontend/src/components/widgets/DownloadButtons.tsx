@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { cn } from "@/lib/utils";
+import { toast } from "sonner";
+import { cn, errorMessage } from "@/lib/utils";
 import type { IntentFilter, PeriodSelection, TaxMode } from "@/types/mis";
 
 type Format = "excel" | "pdf";
@@ -7,6 +8,7 @@ type Format = "excel" | "pdf";
 interface Props {
 	taxMode: TaxMode;
 	period: PeriodSelection;
+	company?: string;
 	intent?: IntentFilter;
 	className?: string;
 }
@@ -21,52 +23,88 @@ const LABEL: Record<Format, string> = {
 	pdf: "PDF",
 };
 
-/** Two-button group that kicks off a same-origin form POST so the browser
- *  handles the download natively. CSRF passes as the ``csrf_token`` form field
- *  (native form-submit can't set custom headers). */
-export function DownloadButtons({ taxMode, period, intent = "all", className }: Props) {
+function filenameFrom(disposition: string | null, fallback: string): string {
+	if (!disposition) return fallback;
+	const star = disposition.match(/filename\*=(?:UTF-8'')?([^;]+)/i);
+	if (star) return decodeURIComponent(star[1].trim().replace(/"/g, ""));
+	const plain = disposition.match(/filename="?([^";]+)"?/i);
+	return plain ? plain[1].trim() : fallback;
+}
+
+/** Reads the frappe error body (JSON with exception / _server_messages) of a failed export. */
+async function readError(res: Response): Promise<string> {
+	try {
+		const text = await res.text();
+		try {
+			return errorMessage({ ...JSON.parse(text), httpStatus: res.status, httpStatusText: res.statusText });
+		} catch {
+			const plain = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+			return plain.slice(0, 300) || `${res.status} ${res.statusText}`;
+		}
+	} catch {
+		return `${res.status} ${res.statusText}`;
+	}
+}
+
+/** Two-button group that POSTs the current filters (with the CSRF header) and saves the
+ *  returned file. A failed export shows the server's error instead of navigating away. */
+export function DownloadButtons({ taxMode, period, company, intent = "all", className }: Props) {
 	const [busy, setBusy] = useState<Format | null>(null);
 
-	const trigger = (format: Format) => {
-		const form = document.createElement("form");
-		form.method = "POST";
-		form.action = ENDPOINT[format];
-		form.target = "_self";
-		const fields: Record<string, string> = {
-			tax_mode: taxMode,
-			intent,
-		};
+	const trigger = async (format: Format) => {
+		const fields = new URLSearchParams({ tax_mode: taxMode, intent });
 		if (period.kind !== "ttm") {
-			fields.from_date = period.from;
-			fields.to_date = period.to;
+			fields.set("from_date", period.from);
+			fields.set("to_date", period.to);
 		}
-		const csrf = window.csrf_token;
-		if (csrf) fields.csrf_token = csrf;
-		for (const [key, value] of Object.entries(fields)) {
-			const input = document.createElement("input");
-			input.type = "hidden";
-			input.name = key;
-			input.value = value;
-			form.appendChild(input);
-		}
-		document.body.appendChild(form);
+		if (company) fields.set("company", company);
 		setBusy(format);
-		form.submit();
-		document.body.removeChild(form);
-		// Browser takes over once the binary arrives — clear the spinner shortly after.
-		window.setTimeout(() => setBusy(null), 2000);
+		try {
+			const res = await fetch(ENDPOINT[format], {
+				method: "POST",
+				credentials: "same-origin",
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded",
+					...(window.csrf_token ? { "X-Frappe-CSRF-Token": window.csrf_token } : {}),
+				},
+				body: fields.toString(),
+			});
+			const type = res.headers.get("Content-Type") ?? "";
+			if (!res.ok || type.includes("application/json") || type.includes("text/html")) {
+				throw new Error(await readError(res));
+			}
+			const blob = await res.blob();
+			const name = filenameFrom(
+				res.headers.get("Content-Disposition"),
+				format === "excel" ? "MIS.xlsx" : "MIS.pdf",
+			);
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement("a");
+			a.href = url;
+			a.download = name;
+			document.body.appendChild(a);
+			a.click();
+			a.remove();
+			window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+		} catch (err) {
+			toast.error(`${LABEL[format]} export failed`, {
+				description: err instanceof Error ? err.message : errorMessage(err),
+			});
+		} finally {
+			setBusy(null);
+		}
 	};
 
 	return (
 		<div className={cn("inline-flex items-center gap-1", className)}>
 			<DownloadButton
-				onClick={() => trigger("excel")}
+				onClick={() => void trigger("excel")}
 				label={LABEL.excel}
 				format="excel"
 				busy={busy === "excel"}
 			/>
 			<DownloadButton
-				onClick={() => trigger("pdf")}
+				onClick={() => void trigger("pdf")}
 				label={LABEL.pdf}
 				format="pdf"
 				busy={busy === "pdf"}

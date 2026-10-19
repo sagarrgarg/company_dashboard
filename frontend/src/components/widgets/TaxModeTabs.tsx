@@ -6,9 +6,10 @@ interface Props {
 	onChange: (mode: TaxMode) => void;
 }
 
+// Tax mode only changes how revenue is displayed; margins, costs and the P&L are always ex-tax.
 const MODES: Array<{ key: TaxMode; label: string; hint: string }> = [
-	{ key: "incl", label: "Tax Incl.", hint: "Gross of GST" },
-	{ key: "excl", label: "Tax Excl.", hint: "Net of GST" },
+	{ key: "excl", label: "Tax Excl.", hint: "Revenue net of GST (margins are always ex-tax)" },
+	{ key: "incl", label: "Tax Incl.", hint: "Revenue gross of GST (margins stay ex-tax)" },
 ];
 
 export function TaxModeTabs({ value, onChange }: Props) {

@@ -14,7 +14,7 @@ async function bootstrapDevSession() {
 	if (!import.meta.env.DEV) return;
 	if (window.frappe?.boot) return;
 	try {
-		const res = await fetch("/api/method/company_dashboard.www.mis.get_context_for_dev", {
+		const res = await fetch("/api/method/company_dashboard.www.bizdashboard.get_context_for_dev", {
 			credentials: "include",
 		});
 		if (!res.ok) return;
