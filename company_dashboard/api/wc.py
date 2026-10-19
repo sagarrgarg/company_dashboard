@@ -1,442 +1,682 @@
 """Working Capital dashboard API.
 
-All data comes from ERPNext GL Entry, Payment Ledger Entry, and Bin tables.
-AR/AP aging reuses the BNS Pure Accounts Receivable/Payable Summary reports
-with FIFO running-account adjustment so numbers match the BNS reports exactly.
+Every headline figure ties to the GL as of the snapshot date:
+
+- **Cash and bank** = asset-side Bank and Cash accounts. Overdraft / cash-credit accounts
+  (Bank accounts under Liabilities) are **borrowings**, a separate line. Payment-gateway
+  and marketplace clearing accounts are **gateway receivables**, not cash.
+- **Trade receivable / payable** = GL balances of Receivable / Payable accounts, by party,
+  excluding internal accounts, internal parties and admin-excluded groups. Advances (parties
+  whose balance points the other way) are their own line; the trade figure is the net.
+- **Stock** = GL Stock accounts. Bins (every bin, negatives included) are only used for
+  the item-group / warehouse breakdown, with the bin-vs-GL gap shown.
+- **Ageing** comes from the BNS Pure AR/AP reports (FIFO), run **once** per snapshot and
+  scaled to the GL gross balance so buckets always add up to the headline.
+
+All five panels come from one snapshot per company per day, computed under one lock.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, timedelta
 
 import frappe
 from frappe.utils import add_months, flt, getdate, today
 
-from company_dashboard.api.mis import _require_wc_access
+from company_dashboard.api.mis import _require_wc_access, _resolve_company
+from company_dashboard.api.report_cache import get_or_compute as _cached
 from company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings import (
+	get_configured_accounts,
 	get_wc_exclude_customer_groups,
 	get_wc_exclude_supplier_groups,
 )
 
-# Internal customer/supplier filter — same logic as MIS to exclude intercompany.
-_INTERNAL_CUSTOMER_FILTER = """
-	and coalesce(c.is_internal_customer, 0) = 0
-	and coalesce(c.is_bns_internal_customer, 0) = 0
-"""
-_INTERNAL_SUPPLIER_FILTER = """
-	and coalesce(sup.is_internal_supplier, 0) = 0
-"""
+AGEING_RANGES = "30, 60, 90, 120"
+TOP_PARTIES = 10
+REORDER_LIST_LIMIT = 10
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
+
 def _default_company() -> str:
-	company = frappe.defaults.get_global_default("company")
-	if company:
-		return company
-	rows = frappe.get_all("Company", filters={"disabled": 0}, fields=["name"], order_by="creation asc", limit=1)
-	return rows[0]["name"] if rows else ""
+	return _resolve_company(None)
 
 
-def _customer_group_exclude_clause(params: dict) -> str:
-	"""SQL clause + params injection for excluded customer groups."""
-	groups = get_wc_exclude_customer_groups()
-	if not groups:
-		return ""
-	params["_excl_cgroups"] = tuple(groups)
-	return "and coalesce(c.customer_group, '') not in %(_excl_cgroups)s"
+def _finance_book_clause(company: str, params: dict) -> str:
+	fb = frappe.get_cached_value("Company", company, "default_finance_book")
+	if fb:
+		params["finance_book"] = fb
+		return "and (coalesce(ge.finance_book, '') = '' or ge.finance_book = %(finance_book)s)"
+	return "and coalesce(ge.finance_book, '') = ''"
 
 
-def _supplier_group_exclude_clause(params: dict) -> str:
-	"""SQL clause + params injection for excluded supplier groups."""
-	groups = get_wc_exclude_supplier_groups()
-	if not groups:
-		return ""
-	params["_excl_sgroups"] = tuple(groups)
-	return "and coalesce(sup.supplier_group, '') not in %(_excl_sgroups)s"
+def _internal_accounts() -> set[str]:
+	return set(get_configured_accounts("wc_internal_accounts"))
 
 
-# ── BANK BALANCE ────────────────────────────────────────────────────────────
-
-def _get_bank_accounts(company: str) -> list[str]:
-	"""Bank accounts for a company — same filter as BNS bank_gl.js: account_type = 'Bank'."""
+def _leaf_accounts(
+	company: str, account_types: tuple[str, ...], root_types: tuple[str, ...] | None = None
+) -> list[frappe._dict]:
+	filters: dict = {"company": company, "is_group": 0, "account_type": ("in", list(account_types))}
+	if root_types:
+		filters["root_type"] = ("in", list(root_types))
 	return frappe.get_all(
-		"Account",
-		filters={"company": company, "account_type": "Bank", "is_group": 0, "disabled": 0},
-		pluck="name",
+		"Account", filters=filters, fields=["name", "account_name", "account_type", "root_type", "disabled"]
 	)
 
 
-def _bank_balance_per_account(company: str) -> list[dict]:
-	"""Per-account balance (debit − credit) and last posting date."""
-	accounts = _get_bank_accounts(company)
+def _balances(company: str, accounts: list[str], as_of: date) -> dict[str, float]:
+	"""Debit − credit per account up to and including ``as_of``."""
 	if not accounts:
-		return []
+		return {}
+	params: dict = {"accounts": tuple(accounts), "company": company, "as_of": as_of}
+	fb = _finance_book_clause(company, params)
 	rows = frappe.db.sql(
-		"""
-		select
-			account,
-			sum(debit) - sum(credit) as balance,
-			max(posting_date) as last_posting_date
-		from `tabGL Entry`
-		where account in %(accounts)s
-		  and company = %(company)s
-		  and is_cancelled = 0
-		group by account
-		order by balance desc
+		f"""
+		select ge.account, sum(ge.debit) - sum(ge.credit) as bal, max(ge.posting_date) as last_posting_date
+		from `tabGL Entry` ge
+		where ge.account in %(accounts)s and ge.company = %(company)s
+		  and ge.is_cancelled = 0 and ge.posting_date <= %(as_of)s
+		  {fb}
+		group by ge.account
 		""",
-		{"accounts": tuple(accounts), "company": company},
+		params,
 		as_dict=True,
 	)
-	return [
-		{
-			"account": r["account"],
-			"balance": flt(r["balance"]),
-			"last_posting_date": r["last_posting_date"].isoformat() if r["last_posting_date"] else None,
-		}
-		for r in rows
-	]
+	return {r.account: frappe._dict(bal=flt(r.bal), last=r.last_posting_date) for r in rows}
 
 
-def _bank_monthly_trend(company: str, months: int = 6) -> list[dict]:
-	"""Monthly opening balance across all bank accounts for the last N months."""
-	accounts = _get_bank_accounts(company)
-	if not accounts:
-		return []
-	ref = getdate(today())
-	# We compute cumulative balance as-of the 1st of each month
-	points = []
-	for i in range(months, 0, -1):
-		dt = getdate(add_months(ref, -(i - 1)))
-		first_of_month = dt.replace(day=1)
-		rows = frappe.db.sql(
-			"""
-			select coalesce(sum(debit) - sum(credit), 0) as bal
-			from `tabGL Entry`
-			where account in %(accounts)s
-			  and company = %(company)s
-			  and posting_date < %(dt)s
-			  and is_cancelled = 0
+def _internal_parties(party_type: str) -> set[str]:
+	doctype = "Customer" if party_type == "Customer" else "Supplier"
+	std = "is_internal_customer" if party_type == "Customer" else "is_internal_supplier"
+	bns = "is_bns_internal_customer" if party_type == "Customer" else "is_bns_internal_supplier"
+	clauses = [f"coalesce({std}, 0) = 1"]
+	if frappe.db.has_column(doctype, bns):
+		clauses.append(f"coalesce({bns}, 0) = 1")
+	return set(frappe.db.sql(f"select name from `tab{doctype}` where {' or '.join(clauses)}", pluck=True))
+
+
+def _excluded_group_parties(party_type: str) -> set[str]:
+	if party_type == "Customer":
+		groups = get_wc_exclude_customer_groups()
+		doctype, field = "Customer", "customer_group"
+	else:
+		groups = get_wc_exclude_supplier_groups()
+		doctype, field = "Supplier", "supplier_group"
+	if not groups:
+		return set()
+	return set(frappe.get_all(doctype, filters={field: ("in", groups)}, pluck="name"))
+
+
+def _party_exclusions(party_type: str) -> set[str]:
+	return _internal_parties(party_type) | _excluded_group_parties(party_type)
+
+
+def _party_side(company: str, party_type: str, as_of: date) -> dict:
+	"""Per-party GL balances on trade Receivable (Customer) or Payable (Supplier) accounts.
+	Payables are returned positive (credit balance = owed). Rows for other party types on
+	the same accounts (e.g. employees) stay in the total, keyed "<type>: <party>"."""
+	account_type = "Receivable" if party_type == "Customer" else "Payable"
+	sign = 1 if party_type == "Customer" else -1
+	internal_accs = _internal_accounts()
+	all_accounts = [a.name for a in _leaf_accounts(company, (account_type,))]
+	trade_accounts = [a for a in all_accounts if a not in internal_accs]
+	internal_accounts = [a for a in all_accounts if a in internal_accs]
+	excluded = _party_exclusions(party_type)
+
+	balances: dict[str, float] = {}
+	excluded_total = 0.0
+	if trade_accounts:
+		params: dict = {"accounts": tuple(trade_accounts), "company": company, "as_of": as_of}
+		fb = _finance_book_clause(company, params)
+		for ptype, party, bal in frappe.db.sql(
+			f"""
+			select coalesce(ge.party_type, ''), coalesce(ge.party, ''), sum(ge.debit) - sum(ge.credit)
+			from `tabGL Entry` ge
+			where ge.account in %(accounts)s and ge.company = %(company)s
+			  and ge.is_cancelled = 0 and ge.posting_date <= %(as_of)s
+			  {fb}
+			group by coalesce(ge.party_type, ''), coalesce(ge.party, '')
 			""",
-			{"accounts": tuple(accounts), "company": company, "dt": first_of_month},
-			as_dict=True,
-		)
-		points.append({
-			"month": first_of_month.strftime("%b"),
-			"year": first_of_month.year,
-			"balance": flt(rows[0]["bal"]) if rows else 0.0,
-		})
-	return points
+			params,
+		):
+			bal = sign * flt(bal)
+			own_type = ptype in (party_type, "")
+			if own_type and party and party in excluded:
+				excluded_total += bal
+				continue
+			if abs(bal) >= 0.005:
+				key = party if own_type else f"{ptype}: {party}"
+				balances[key] = balances.get(key, 0.0) + bal
 
-
-def _cash_burn_rate(company: str) -> float:
-	"""Average monthly net outflow from bank accounts over trailing 3 months."""
-	accounts = _get_bank_accounts(company)
-	if not accounts:
-		return 0.0
-	ref = getdate(today())
-	three_months_ago = getdate(add_months(ref, -3))
-	rows = frappe.db.sql(
-		"""
-		select coalesce(sum(credit) - sum(debit), 0) as outflow
-		from `tabGL Entry`
-		where account in %(accounts)s
-		  and company = %(company)s
-		  and posting_date >= %(from)s
-		  and posting_date <= %(to)s
-		  and is_cancelled = 0
-		""",
-		{"accounts": tuple(accounts), "company": company, "from": three_months_ago, "to": ref},
-		as_dict=True,
-	)
-	total_outflow = flt(rows[0]["outflow"]) if rows else 0.0
-	return max(total_outflow / 3, 0.0)
-
-
-# ── AR / AP via BNS reports ─────────────────────────────────────────────────
-
-def _run_receivable_summary(company: str, ranges: str = "30, 60, 90, 120") -> list[dict]:
-	"""Run BNS Pure Accounts Receivable Summary (full execute with Party Link netting,
-	FIFO aging adjustment, and negative-bucket redistribution).
-	Post-filters internal customers and admin-excluded customer groups."""
-	from business_needed_solutions.business_needed_solutions.report.pure_accounts_receivable_summary.pure_accounts_receivable_summary import (
-		execute as ar_execute,
-	)
-	excl_groups = get_wc_exclude_customer_groups()
-	filters = frappe._dict({
-		"company": company,
-		"report_date": today(),
-		"ageing_based_on": "Posting Date",
-		"range": ranges,
-		"adjust_running_accounts": 1,
-		"show_future_payments": 0,
-		"show_gl_balance": 0,
-		"exclude_customer_group": excl_groups or [],
-	})
-	_cols, data = ar_execute(filters)
-	internal_customers = _get_internal_customers()
-	return [row for row in data if row.get("party") not in internal_customers]
-
-
-def _run_payable_summary(company: str, ranges: str = "30, 60, 90, 120") -> list[dict]:
-	"""Run BNS Pure Accounts Payable Summary (full execute with Party Link netting,
-	FIFO aging adjustment, and negative-bucket redistribution).
-	Post-filters internal suppliers and admin-excluded supplier groups."""
-	from business_needed_solutions.business_needed_solutions.report.pure_accounts_payable_summary.pure_accounts_payable_summary import (
-		execute as ap_execute,
-	)
-	excl_groups = get_wc_exclude_supplier_groups()
-	filters = frappe._dict({
-		"company": company,
-		"report_date": today(),
-		"ageing_based_on": "Posting Date",
-		"range": ranges,
-		"adjust_running_accounts": 1,
-		"show_future_payments": 0,
-		"show_gl_balance": 0,
-		"exclude_supplier_group": excl_groups or [],
-	})
-	_cols, data = ap_execute(filters)
-	internal_suppliers = _get_internal_suppliers()
-	return [row for row in data if row.get("party") not in internal_suppliers]
-
-
-def _get_internal_customers() -> set[str]:
-	"""Set of customer names that are internal (intercompany)."""
-	rows = frappe.db.sql(
-		"""
-		select name from `tabCustomer`
-		where coalesce(is_internal_customer, 0) = 1
-		   or coalesce(is_bns_internal_customer, 0) = 1
-		""",
-		pluck=True,
-	)
-	return set(rows)
-
-
-def _get_internal_suppliers() -> set[str]:
-	"""Set of supplier names that are internal (intercompany)."""
-	rows = frappe.db.sql(
-		"""
-		select name from `tabSupplier`
-		where coalesce(is_internal_supplier, 0) = 1
-		""",
-		pluck=True,
-	)
-	return set(rows)
-
-
-def _aggregate_aging(data: list[dict], ranges: str = "30, 60, 90, 120") -> dict:
-	"""Aggregate per-party rows into aging buckets summary.
-	Only considers parties with positive outstanding (skips advance balances)."""
-	range_list = [r.strip() for r in ranges.split(",") if r.strip().isdigit()]
-	num_buckets = len(range_list) + 1
-
-	bucket_totals = [0.0] * num_buckets
-	total_outstanding = 0.0
-	total_overdue = 0.0
-
-	for row in data:
-		outstanding = flt(row.get("outstanding", 0))
-		if outstanding <= 0:
-			continue
-		total_outstanding += outstanding
-		for i in range(num_buckets):
-			val = flt(row.get(f"range{i + 1}", 0))
-			bucket_totals[i] += max(val, 0)
-		for i in range(1, num_buckets):
-			total_overdue += max(flt(row.get(f"range{i + 1}", 0)), 0)
-
-	labels = []
-	prev = 0
-	for r in range_list:
-		labels.append(f"{prev + 1} – {r} Days" if prev > 0 else f"0 – {r} Days")
-		prev = int(r)
-	labels.append(f"> {range_list[-1]} Days")
-
-	buckets = []
-	for i, label in enumerate(labels):
-		pct = (bucket_totals[i] / total_outstanding * 100) if total_outstanding else 0
-		buckets.append({"label": label, "amount": bucket_totals[i], "pct": round(pct, 1)})
-
+	internal = sum(sign * b.bal for b in _balances(company, internal_accounts, as_of).values())
+	gross = sum(b for b in balances.values() if b > 0)
+	advances = sum(b for b in balances.values() if b < 0)
 	return {
-		"total_outstanding": total_outstanding,
-		"total_overdue": total_overdue,
-		"buckets": buckets,
+		"balances": balances,
+		"net": gross + advances,
+		"gross": gross,
+		# ≤ 0: parties whose net balance points the other way — money received / paid in
+		# advance, as of the date, JV advances included. Measured on the net party balance,
+		# not on unallocated Payment Ledger rows: BNS running-account (FIFO) books leave most
+		# payments unallocated, so those rows would overstate advances many times over.
+		"advances": advances,
+		"excluded_parties_total": excluded_total,
+		"internal_accounts_total": internal,
+		"trade_accounts": trade_accounts,
+		"internal_accounts": internal_accounts,
 	}
 
 
-def _top_parties(data: list[dict], limit: int = 10) -> list[dict]:
-	"""Top N parties by outstanding amount, with age and status."""
-	positive = [r for r in data if flt(r.get("outstanding", 0)) > 0]
-	sorted_data = sorted(positive, key=lambda r: flt(r.get("outstanding", 0)), reverse=True)
-	out = []
-	for row in sorted_data[:limit]:
-		outstanding = flt(row.get("outstanding", 0))
-		age = 0
-		# Use the highest non-zero range bucket to approximate age. Each bucket maps to the
-		# *lower edge* of its overdue span (range1=0-30d → 0, range2=31-60d → 31, …); using
-		# the lower bound with >= thresholds keeps the status correct. (Previously the bucket
-		# floor 0/30/60/90 was compared with strict >, so a 31-60d balance scored age=30 and
-		# 30>30 was False → mislabeled "Current", and 61-90d showed as "Watch" not "Overdue".)
-		for i in range(5, 0, -1):
-			if flt(row.get(f"range{i}", 0)) > 0:
-				age = [0, 31, 61, 91, 121][min(i - 1, 4)]
-				break
+# ── BANK AND CASH ───────────────────────────────────────────────────────────
 
-		if age >= 61:
-			status = "Overdue"
-		elif age >= 31:
-			status = "Watch"
+
+def _bank_section(company: str, as_of: date) -> dict:
+	gateways = set(get_configured_accounts("wc_gateway_accounts"))
+	accounts = _leaf_accounts(company, ("Bank", "Cash"))
+	known = {a.name for a in accounts}
+	if gateways - known:
+		accounts += frappe.get_all(
+			"Account",
+			filters={"name": ("in", list(gateways - known)), "company": company, "is_group": 0},
+			fields=["name", "account_name", "account_type", "root_type", "disabled"],
+		)
+	bal = _balances(company, [a.name for a in accounts], as_of)
+
+	rows = []
+	for a in accounts:
+		b = bal.get(a.name)
+		if not b and a.disabled:
+			continue
+		if a.root_type == "Liability":
+			kind = "borrowing"
+		elif a.name in gateways:
+			kind = "gateway"
 		else:
-			status = "Current"
+			kind = "cash" if a.account_type == "Cash" else "bank"
+		rows.append(
+			{
+				"account": a.name,
+				"kind": kind,
+				"balance": b.bal if b else 0.0,
+				"last_posting_date": b.last.isoformat() if b and b.last else None,
+			}
+		)
+	rows.sort(key=lambda r: (["bank", "cash", "gateway", "borrowing"].index(r["kind"]), -r["balance"]))
 
-		out.append({
-			"party": row.get("party", ""),
-			"party_name": row.get("party_name", ""),
-			"customer_group": row.get("customer_group", ""),
-			"supplier_group": row.get("supplier_group", ""),
-			"outstanding": outstanding,
-			"age_days": age,
-			"status": status,
-			"invoiced": flt(row.get("invoiced", 0)),
-			"paid": flt(row.get("paid", 0)),
-		})
+	def total(*kinds: str) -> float:
+		return sum(r["balance"] for r in rows if r["kind"] in kinds)
+
+	cash_accounts = [r["account"] for r in rows if r["kind"] in ("bank", "cash")]
+	cash_and_bank = total("bank", "cash")
+	# Burn counts cash, bank and OD/CC together, so moving money between them is not burn.
+	burn = _cash_burn_rate(
+		company, [r["account"] for r in rows if r["kind"] in ("bank", "cash", "borrowing")], as_of
+	)
+	return {
+		"accounts": rows,
+		"cash_and_bank": cash_and_bank,
+		"bank_total": total("bank"),
+		"cash_total": total("cash"),
+		"gateway_receivables": total("gateway"),
+		"borrowings": total("borrowing"),  # negative = drawn
+		"trend": _cash_trend(company, cash_accounts, as_of),
+		**burn,
+		"days_cash_on_hand": (
+			round(cash_and_bank / burn["cash_burn_monthly"] * 30, 0)
+			if cash_and_bank > 0 and burn["cash_burn_monthly"] > 0
+			else None
+		),
+	}
+
+
+def _cash_trend(company: str, accounts: list[str], as_of: date, months: int = 6) -> list[dict]:
+	"""Cash + bank balance at the start of each of the last N months, plus today — one
+	GL pass with a conditional sum per point."""
+	if not accounts:
+		return []
+	firsts = [getdate(add_months(as_of.replace(day=1), -i)) for i in range(months - 1, -1, -1)]
+	params: dict = {"accounts": tuple(accounts), "company": company, "as_of": as_of}
+	cols = []
+	for i, first in enumerate(firsts):
+		params[f"d{i}"] = first
+		cols.append(f"coalesce(sum(case when ge.posting_date < %(d{i})s then ge.debit - ge.credit end), 0)")
+	cols.append("coalesce(sum(ge.debit - ge.credit), 0)")
+	fb = _finance_book_clause(company, params)
+	row = frappe.db.sql(
+		f"""
+		select {", ".join(cols)}
+		from `tabGL Entry` ge
+		where ge.account in %(accounts)s and ge.company = %(company)s
+		  and ge.is_cancelled = 0 and ge.posting_date <= %(as_of)s
+		  {fb}
+		""",
+		params,
+	)[0]
+	points = [
+		{
+			"date": first.isoformat(),
+			"month": first.strftime("%b"),
+			"year": first.year,
+			"balance": flt(row[i]),
+			"is_today": False,
+		}
+		for i, first in enumerate(firsts)
+	]
+	points.append(
+		{
+			"date": as_of.isoformat(),
+			"month": "Today",
+			"year": as_of.year,
+			"balance": flt(row[-1]),
+			"is_today": True,
+		}
+	)
+	return points
+
+
+def _cash_burn_rate(company: str, accounts: list[str], as_of: date) -> dict:
+	"""Average monthly net outflow over the trailing 3 months across all cash and bank
+	accounts together, so transfers between them cancel out instead of counting as burn."""
+	if not accounts:
+		return {"cash_burn_monthly": 0.0, "net_inflow": False}
+	params: dict = {
+		"accounts": tuple(accounts),
+		"company": company,
+		"from": getdate(add_months(as_of, -3)),
+		"to": as_of,
+	}
+	fb = _finance_book_clause(company, params)
+	row = frappe.db.sql(
+		f"""
+		select coalesce(sum(ge.credit) - sum(ge.debit), 0)
+		from `tabGL Entry` ge
+		where ge.account in %(accounts)s and ge.company = %(company)s and ge.is_cancelled = 0
+		  and ge.posting_date > %(from)s and ge.posting_date <= %(to)s
+		  {fb}
+		""",
+		params,
+	)
+	outflow = flt(row[0][0]) / 3 if row else 0.0
+	return {"cash_burn_monthly": max(outflow, 0.0), "net_inflow": outflow < 0}
+
+
+# ── AGEING VIA BNS ─────────────────────────────────────────────────────────
+
+
+@contextmanager
+def _as_administrator():
+	"""Run the BNS / ERPNext ageing report with full read access.
+
+	Those reports read invoices through ``frappe.get_list``, which applies the caller's
+	permissions, so a user who only has *WC Viewer* would get "Insufficient Permission
+	for Purchase Invoice". The caller has already passed ``_require_wc_access`` and only
+	receives aggregates. ``frappe.set_user`` overwrites the request's session id and
+	form_dict, so both are restored exactly afterwards.
+	"""
+	local = frappe.local
+	saved_session = frappe._dict(local.session)
+	saved = {
+		k: getattr(local, k, None)
+		for k in (
+			"form_dict",
+			"role_permissions",
+			"new_doc_templates",
+			"user_perms",
+			"jenv_restricted",
+			"jenv_unrestricted",
+		)
+	}
+	try:
+		frappe.set_user("Administrator")
+		yield
+	finally:
+		local.session.clear()
+		local.session.update(saved_session)
+		for k, v in saved.items():
+			setattr(local, k, v)
+		local.cache = {}
+
+
+def _run_bns(party_type: str, company: str, as_of: date) -> list[dict]:
+	"""BNS Pure AR/AP Summary (Party Link netting + FIFO ageing), run once per snapshot."""
+	if party_type == "Customer":
+		from business_needed_solutions.business_needed_solutions.report.pure_accounts_receivable_summary.pure_accounts_receivable_summary import (
+			execute,
+		)
+
+		group_key, groups = "exclude_customer_group", get_wc_exclude_customer_groups()
+	else:
+		from business_needed_solutions.business_needed_solutions.report.pure_accounts_payable_summary.pure_accounts_payable_summary import (
+			execute,
+		)
+
+		group_key, groups = "exclude_supplier_group", get_wc_exclude_supplier_groups()
+	filters = frappe._dict(
+		{
+			"company": company,
+			"report_date": as_of.isoformat(),
+			"ageing_based_on": "Posting Date",
+			"range": AGEING_RANGES,
+			# Older ERPNext v15 releases read range1..range4 instead of ``range``.
+			**{f"range{i + 1}": int(v) for i, v in enumerate(AGEING_RANGES.split(","))},
+			"adjust_running_accounts": 1,
+			"show_future_payments": 0,
+			"show_gl_balance": 0,
+			group_key: groups or [],
+		}
+	)
+	with _as_administrator():
+		_cols, data = execute(filters)
+	excluded = _party_exclusions(party_type)
+	return [row for row in data if row.get("party") not in excluded]
+
+
+def _bucket_labels() -> list[str]:
+	edges = [int(r.strip()) for r in AGEING_RANGES.split(",") if r.strip().isdigit()]
+	labels, prev = [], 0
+	for e in edges:
+		labels.append(f"0 – {e} Days" if prev == 0 else f"{prev + 1} – {e} Days")
+		prev = e
+	labels.append(f"> {edges[-1]} Days")
+	return labels
+
+
+def _ageing(bns_rows: list[dict], gl_gross: float) -> dict:
+	"""BNS FIFO ageing of positive balances, unscaled. Whatever the GL gross holds beyond
+	that (balances BNS nets through Party Links, timing) is a separate reconciling bucket,
+	so the buckets always add up to the headline without inflating any real bucket."""
+	labels = _bucket_labels()
+	n = len(labels)
+	raw = [0.0] * n
+	bns_total = 0.0
+	for row in bns_rows:
+		if flt(row.get("outstanding")) <= 0:
+			continue
+		bns_total += flt(row.get("outstanding"))
+		for i in range(n):
+			raw[i] += max(flt(row.get(f"range{i + 1}")), 0.0)
+
+	def pct(x: float) -> float:
+		return round(x / gl_gross * 100, 1) if gl_gross else 0.0
+
+	buckets = [
+		{"label": labels[i], "amount": raw[i], "pct": pct(raw[i]), "reconciling": False} for i in range(n)
+	]
+	diff = gl_gross - sum(raw)
+	warning = None
+	if abs(diff) >= 1:
+		buckets.append(
+			{
+				"label": "Not aged by BNS (Party Link netting / timing)",
+				"amount": diff,
+				"pct": pct(diff),
+				"reconciling": True,
+			}
+		)
+		if gl_gross and abs(diff) / abs(gl_gross) > 0.05:
+			warning = (
+				f"BNS ageing covers {sum(raw) / gl_gross * 100:.0f}% of the GL balance; the rest is "
+				"netted through Party Links or not yet aged."
+			)
+	return {
+		"total_outstanding": gl_gross,
+		"total_overdue": sum(raw[1:]),
+		"buckets": buckets,
+		"bns_total": bns_total,
+		"warning": warning,
+	}
+
+
+def _age_by_party(bns_rows: list[dict]) -> dict[str, int]:
+	"""Lower edge of the oldest non-zero bucket per party (0, 31, 61, 91, 121)."""
+	edges = [0] + [int(r.strip()) + 1 for r in AGEING_RANGES.split(",") if r.strip().isdigit()]
+	out: dict[str, int] = {}
+	for row in bns_rows:
+		for i in range(len(edges), 0, -1):
+			if flt(row.get(f"range{i}")) > 0:
+				out[row.get("party")] = edges[i - 1]
+				break
 	return out
 
 
-def _bns_ar_total(data: list[dict]) -> float:
-	"""Net outstanding from BNS AR report rows (includes negatives from advances)."""
-	return sum(flt(r.get("outstanding", 0)) for r in data)
+def _top_parties(side: dict, bns_rows: list[dict], party_type: str) -> list[dict]:
+	"""Top parties by GL balance, with age and status from the BNS ageing."""
+	ages = _age_by_party(bns_rows)
+	names_field = "customer_name" if party_type == "Customer" else "supplier_name"
+	group_field = "customer_group" if party_type == "Customer" else "supplier_group"
+	top = sorted(((p, b) for p, b in side["balances"].items() if b > 0), key=lambda pb: -pb[1])[:TOP_PARTIES]
+	info = (
+		{
+			r.name: r
+			for r in frappe.get_all(
+				party_type,
+				filters={"name": ("in", [p for p, _b in top if p])},
+				fields=["name", f"{names_field} as party_name", f"{group_field} as party_group"],
+			)
+		}
+		if top
+		else {}
+	)
+	out = []
+	for party, bal in top:
+		age = ages.get(party, 0)
+		meta = info.get(party) or frappe._dict()
+		out.append(
+			{
+				"party": party or "(no party)",
+				"party_name": meta.get("party_name") or party or "(no party)",
+				"customer_group": meta.get("party_group") if party_type == "Customer" else "",
+				"supplier_group": meta.get("party_group") if party_type == "Supplier" else "",
+				"outstanding": bal,
+				"age_days": age,
+				"status": "Overdue" if age >= 61 else "Watch" if age >= 31 else "Current",
+			}
+		)
+	return out
 
 
-def _bns_ap_total(data: list[dict]) -> float:
-	"""Net outstanding from BNS AP report rows (includes negatives from advances)."""
-	return sum(flt(r.get("outstanding", 0)) for r in data)
+# ── RATIOS ─────────────────────────────────────────────────────────────────
 
 
-def _dso(company: str, ar_total: float | None = None, days: int = 365) -> float:
-	"""Days Sales Outstanding = (Trade Receivable / Credit Sales) × Days."""
-	ref = getdate(today())
-	from_date = ref - timedelta(days=days)
-	params: dict = {"company": company, "from": from_date, "to": ref}
-	cg_clause = _customer_group_exclude_clause(params)
-	rows = frappe.db.sql(
+def _net_credit_sales(company: str, as_of: date, days: int = 365) -> float:
+	"""Invoiced sales incl. tax, net of returns, external, non-POS, over the window."""
+	excluded = _party_exclusions("Customer")
+	params: dict = {"company": company, "from": as_of - timedelta(days=days - 1), "to": as_of}
+	clause = ""
+	if excluded:
+		params["excluded"] = tuple(excluded)
+		clause = "and si.customer not in %(excluded)s"
+	row = frappe.db.sql(
 		f"""
-		select coalesce(sum(si.base_grand_total), 0) as sales
+		select coalesce(sum(si.base_grand_total), 0)
 		from `tabSales Invoice` si
-		left join `tabCustomer` c on c.name = si.customer
 		where si.docstatus = 1 and si.company = %(company)s
 		  and si.posting_date between %(from)s and %(to)s
-		  and si.is_return = 0
-		  {_INTERNAL_CUSTOMER_FILTER}
-		  {cg_clause}
+		  and coalesce(si.is_pos, 0) = 0
+		  and coalesce(si.is_opening, 'No') != 'Yes'
+		  {clause}
 		""",
 		params,
-		as_dict=True,
 	)
-	credit_sales = flt(rows[0]["sales"]) if rows else 0.0
-
-	if ar_total is None:
-		ar_total = _bns_ar_total(_run_receivable_summary(company))
-	ar = max(ar_total, 0.0)
-	if credit_sales <= 0:
-		return 0.0
-	return round(ar / credit_sales * days, 0)
+	return flt(row[0][0]) if row else 0.0
 
 
-def _dpo(company: str, ap_total: float | None = None, days: int = 365) -> float:
-	"""Days Payable Outstanding = (Trade Payable / Purchases) × Days."""
-	ref = getdate(today())
-	from_date = ref - timedelta(days=days)
-	params: dict = {"company": company, "from": from_date, "to": ref}
-	sg_clause = _supplier_group_exclude_clause(params)
-	rows = frappe.db.sql(
+def _net_purchases(company: str, as_of: date, days: int = 365) -> float:
+	"""Purchase invoices incl. tax, net of returns, external suppliers, over the window."""
+	excluded = _party_exclusions("Supplier")
+	params: dict = {"company": company, "from": as_of - timedelta(days=days - 1), "to": as_of}
+	clause = ""
+	if excluded:
+		params["excluded"] = tuple(excluded)
+		clause = "and pi.supplier not in %(excluded)s"
+	row = frappe.db.sql(
 		f"""
-		select coalesce(sum(pi.base_grand_total), 0) as purchases
+		select coalesce(sum(pi.base_grand_total), 0)
 		from `tabPurchase Invoice` pi
-		left join `tabSupplier` sup on sup.name = pi.supplier
 		where pi.docstatus = 1 and pi.company = %(company)s
 		  and pi.posting_date between %(from)s and %(to)s
-		  and pi.is_return = 0
-		  {_INTERNAL_SUPPLIER_FILTER}
-		  {sg_clause}
+		  and coalesce(pi.is_opening, 'No') != 'Yes'
+		  {clause}
 		""",
 		params,
-		as_dict=True,
 	)
-	purchases = flt(rows[0]["purchases"]) if rows else 0.0
+	return flt(row[0][0]) if row else 0.0
 
-	if ap_total is None:
-		ap_total = _bns_ap_total(_run_payable_summary(company))
-	ap = max(ap_total, 0.0)
-	if purchases <= 0:
+
+def _gl_cogs(company: str, as_of: date, days: int = 365) -> float:
+	"""GL cost of goods (Cost of Goods Sold accounts, internal ones excluded) for the window."""
+	internal = _internal_accounts()
+	accounts = [a.name for a in _leaf_accounts(company, ("Cost of Goods Sold",)) if a.name not in internal]
+	if not accounts:
 		return 0.0
-	return round(ap / purchases * days, 0)
+	params: dict = {
+		"accounts": tuple(accounts),
+		"company": company,
+		"from": as_of - timedelta(days=days - 1),
+		"to": as_of,
+	}
+	fb = _finance_book_clause(company, params)
+	row = frappe.db.sql(
+		f"""
+		select coalesce(sum(ge.debit) - sum(ge.credit), 0)
+		from `tabGL Entry` ge
+		where ge.account in %(accounts)s and ge.company = %(company)s and ge.is_cancelled = 0
+		  and ge.posting_date between %(from)s and %(to)s
+		  and ge.voucher_type != 'Period Closing Voucher'
+		  {fb}
+		""",
+		params,
+	)
+	return flt(row[0][0]) if row else 0.0
+
+
+def _days(numerator: float, denominator: float, days: int = 365) -> float | None:
+	if denominator <= 0 or numerator < 0:
+		return None
+	return round(numerator / denominator * days, 0)
+
+
+def _collection_efficiency(company: str, ar: dict, as_of: date) -> dict:
+	"""Collections ÷ (opening receivable + this month's billing), from GL on trade
+	receivable accounts (company currency), same party exclusions as the AR total."""
+	month_start = as_of.replace(day=1)
+	accounts = ar["trade_accounts"]
+	billing = collections = movement = 0.0
+	if accounts:
+		excluded = _party_exclusions("Customer")
+		params: dict = {"accounts": tuple(accounts), "company": company, "from": month_start, "to": as_of}
+		clause = ""
+		if excluded:
+			params["excluded"] = tuple(excluded)
+			clause = (
+				"and not (coalesce(ge.party_type, '') in ('Customer', '') "
+				"and coalesce(ge.party, '') in %(excluded)s)"
+			)
+		fb = _finance_book_clause(company, params)
+		row = frappe.db.sql(
+			f"""
+			select
+				coalesce(sum(case when ge.voucher_type = 'Sales Invoice' then ge.debit - ge.credit else 0 end), 0),
+				coalesce(sum(case when ge.voucher_type in ('Payment Entry', 'Journal Entry') then ge.credit - ge.debit else 0 end), 0),
+				coalesce(sum(ge.debit - ge.credit), 0)
+			from `tabGL Entry` ge
+			where ge.account in %(accounts)s and ge.company = %(company)s and ge.is_cancelled = 0
+			  and ge.posting_date between %(from)s and %(to)s
+			  {clause} {fb}
+			""",
+			params,
+		)
+		billing, collections, movement = flt(row[0][0]), flt(row[0][1]), flt(row[0][2])
+	# Opening = today's net receivable less this month's movement on the same accounts and
+	# parties — no second pass over the whole receivable history.
+	opening = ar["net"] - movement
+	base = opening + billing
+	return {
+		"collection_efficiency": round(collections / base * 100, 0) if base > 0 else None,
+		"collections_mtd": collections,
+		"billing_mtd": billing,
+		"opening_receivable": opening,
+	}
 
 
 # ── STOCK ───────────────────────────────────────────────────────────────────
 
-def _stock_by_item_group(company: str) -> list[dict]:
-	"""Stock value grouped by Item.item_group."""
-	rows = frappe.db.sql(
+
+def _stock_section(company: str, as_of: date) -> dict:
+	stock_accounts = [a.name for a in _leaf_accounts(company, ("Stock",), ("Asset",))]
+	gl_stock = sum(b.bal for b in _balances(company, stock_accounts, as_of).values())
+
+	bins = frappe.db.sql(
 		"""
-		select
-			coalesce(i.item_group, 'Unclassified') as item_group,
-			sum(b.actual_qty * b.valuation_rate) as stock_value,
-			count(distinct b.item_code) as sku_count
+		select b.item_code, b.warehouse, b.actual_qty, b.stock_value, coalesce(i.item_group, 'Unclassified') as item_group
 		from `tabBin` b
-		join `tabItem` i on i.name = b.item_code
 		join `tabWarehouse` w on w.name = b.warehouse
-		where w.company = %(company)s
-		  and b.actual_qty > 0
-		group by item_group
-		order by stock_value desc
+		left join `tabItem` i on i.name = b.item_code
+		where w.company = %(company)s and (b.actual_qty != 0 or b.stock_value != 0)
 		""",
 		{"company": company},
 		as_dict=True,
 	)
-	return [
-		{"item_group": r["item_group"], "stock_value": flt(r["stock_value"]), "sku_count": int(r["sku_count"])}
-		for r in rows
-	]
+	bin_total = sum(flt(b.stock_value) for b in bins)
+	negative = [b for b in bins if flt(b.actual_qty) < 0]
+	zero_qty_valued = [b for b in bins if flt(b.actual_qty) == 0 and flt(b.stock_value) != 0]
+
+	groups: dict[str, dict] = {}
+	for b in bins:
+		g = groups.setdefault(b.item_group, {"item_group": b.item_group, "stock_value": 0.0, "_skus": set()})
+		g["stock_value"] += flt(b.stock_value)
+		g["_skus"].add(b.item_code)
+	by_group = sorted(
+		(
+			{"item_group": g["item_group"], "stock_value": g["stock_value"], "sku_count": len(g["_skus"])}
+			for g in groups.values()
+		),
+		key=lambda g: -g["stock_value"],
+	)
+	return {
+		"stock_in_hand": gl_stock,
+		"stock_accounts": stock_accounts,
+		"bin_total": bin_total,
+		"bin_vs_gl_gap": bin_total - gl_stock,
+		"negative_bins": {"count": len(negative), "value": sum(flt(b.stock_value) for b in negative)},
+		"zero_qty_valued_bins": {
+			"count": len(zero_qty_valued),
+			"value": sum(flt(b.stock_value) for b in zero_qty_valued),
+		},
+		"by_item_group": by_group,
+		"warehouse_tree": _stock_warehouse_tree(company, bins),
+	}
 
 
-def _stock_warehouse_tree(company: str) -> list[dict]:
-	"""Nested warehouse tree with stock values aggregated up from leaves."""
+def _stock_warehouse_tree(company: str, bins: list) -> list[dict]:
+	"""Nested warehouse tree with every bin's value (negatives included) rolled up."""
 	warehouses = frappe.get_all(
 		"Warehouse",
-		filters={"company": company, "disabled": 0},
+		filters={"company": company},
 		fields=["name", "parent_warehouse", "is_group"],
 		order_by="lft",
 	)
 	if not warehouses:
 		return []
-
-	wh_names = [w["name"] for w in warehouses]
-	rows = frappe.db.sql(
-		"""
-		select b.warehouse,
-			sum(b.actual_qty * b.valuation_rate) as stock_value,
-			count(distinct b.item_code) as sku_count
-		from `tabBin` b
-		where b.warehouse in %(wh)s and b.actual_qty > 0
-		group by b.warehouse
-		""",
-		{"wh": tuple(wh_names)},
-		as_dict=True,
-	)
-	stock_map = {r["warehouse"]: (flt(r["stock_value"]), int(r["sku_count"])) for r in rows}
+	stock_map: dict[str, list] = {}
+	for b in bins:
+		e = stock_map.setdefault(b.warehouse, [0.0, set()])
+		e[0] += flt(b.stock_value)
+		e[1].add(b.item_code)
 
 	node_map: dict[str, dict] = {}
 	roots: list[dict] = []
 	for w in warehouses:
-		sv, sc = stock_map.get(w["name"], (0.0, 0))
+		sv, skus = stock_map.get(w["name"], (0.0, set()))
 		node = {
 			"name": w["name"],
-			"is_group": w["is_group"],
+			"is_group": bool(w["is_group"]),
 			"stock_value": sv,
-			"sku_count": sc,
+			"sku_count": len(skus),
+			"_skus": set(skus),
 			"children": [],
 		}
 		node_map[w["name"]] = node
@@ -449,287 +689,247 @@ def _stock_warehouse_tree(company: str) -> list[dict]:
 	def _aggregate(node: dict) -> None:
 		for child in node["children"]:
 			_aggregate(child)
-		if node["children"]:
-			node["stock_value"] = sum(c["stock_value"] for c in node["children"])
-			node["sku_count"] = sum(c["sku_count"] for c in node["children"])
+			node["stock_value"] += child["stock_value"]
+			node["_skus"] |= child["_skus"]
+		node["sku_count"] = len(node["_skus"])
 
 	def _prune(nodes: list[dict]) -> list[dict]:
 		out = []
 		for n in nodes:
 			n["children"] = _prune(n["children"])
-			if n["stock_value"] > 0 or n["children"]:
+			if abs(n["stock_value"]) >= 0.005 or n["children"]:
 				out.append(n)
 		return out
 
-	def _sort(nodes: list[dict]) -> list[dict]:
+	def _finish(nodes: list[dict]) -> list[dict]:
 		nodes.sort(key=lambda n: n["stock_value"], reverse=True)
 		for n in nodes:
-			_sort(n["children"])
+			n.pop("_skus", None)
+			_finish(n["children"])
 		return nodes
 
 	for r in roots:
 		_aggregate(r)
-	return _sort(_prune(roots))
+	return _finish(_prune(roots))
 
 
-def _reorder_alerts(company: str, limit: int = 10) -> list[dict]:
-	"""Items where actual_qty is below safety_stock or reorder_level."""
-	rows = frappe.db.sql(
+def _reorder_alerts(company: str) -> list[dict]:
+	"""Items below their warehouse reorder level (Item Reorder, projected qty — the rule
+	ERPNext's auto-reorder uses) or below their company-wide safety stock (actual qty)."""
+	alerts: dict[str, dict] = {}
+	if frappe.db.table_exists("Item Reorder"):
+		for r in frappe.db.sql(
+			"""
+			select ir.parent as item_code, i.item_name, i.item_group, i.stock_uom, ir.warehouse,
+			       ir.warehouse_reorder_level as level, coalesce(b.actual_qty, 0) as actual_qty,
+			       coalesce(b.projected_qty, 0) as projected_qty
+			from `tabItem Reorder` ir
+			join `tabItem` i on i.name = ir.parent and i.disabled = 0
+			join `tabWarehouse` w on w.name = ir.warehouse and w.company = %(company)s
+			left join `tabBin` b on b.item_code = ir.parent and b.warehouse = ir.warehouse
+			where ir.parenttype = 'Item' and ir.warehouse_reorder_level > 0
+			  and coalesce(b.projected_qty, 0) < ir.warehouse_reorder_level
+			""",
+			{"company": company},
+			as_dict=True,
+		):
+			key = f"{r.item_code}|{r.warehouse}"
+			alerts[key] = {
+				"item_code": r.item_code,
+				"item_name": r.item_name,
+				"item_group": r.item_group,
+				"warehouse": r.warehouse,
+				"rule": "reorder_level",
+				"actual_qty": flt(r.actual_qty),
+				"projected_qty": flt(r.projected_qty),
+				"safety_stock": flt(r.level),
+				"pct": round(flt(r.projected_qty) / flt(r.level) * 100, 0) if flt(r.level) else 0,
+				"stock_uom": r.stock_uom,
+			}
+	covered = {a["item_code"] for a in alerts.values()}
+	for r in frappe.db.sql(
 		"""
-		select
-			b.item_code,
-			i.item_name,
-			i.item_group,
-			sum(b.actual_qty) as actual_qty,
-			i.safety_stock,
-			i.stock_uom
+		select b.item_code, i.item_name, i.item_group, i.stock_uom, i.safety_stock, sum(b.actual_qty) as actual_qty
 		from `tabBin` b
-		join `tabItem` i on i.name = b.item_code
+		join `tabItem` i on i.name = b.item_code and i.disabled = 0
 		join `tabWarehouse` w on w.name = b.warehouse
-		where w.company = %(company)s
-		  and i.safety_stock > 0
-		group by b.item_code
+		where w.company = %(company)s and i.safety_stock > 0
+		group by b.item_code, i.item_name, i.item_group, i.stock_uom, i.safety_stock
 		having actual_qty < i.safety_stock
-		order by (i.safety_stock - actual_qty) desc
-		limit %(limit)s
 		""",
-		{"company": company, "limit": limit},
+		{"company": company},
 		as_dict=True,
-	)
-	return [
-		{
-			"item_code": r["item_code"],
-			"item_name": r["item_name"],
-			"item_group": r["item_group"],
-			"actual_qty": flt(r["actual_qty"]),
-			"safety_stock": flt(r["safety_stock"]),
-			"pct": round(flt(r["actual_qty"]) / flt(r["safety_stock"]) * 100, 0) if flt(r["safety_stock"]) else 0,
-			"stock_uom": r["stock_uom"],
+	):
+		if r.item_code in covered:
+			continue
+		alerts[r.item_code] = {
+			"item_code": r.item_code,
+			"item_name": r.item_name,
+			"item_group": r.item_group,
+			"warehouse": None,
+			"rule": "safety_stock",
+			"actual_qty": flt(r.actual_qty),
+			"projected_qty": None,
+			"safety_stock": flt(r.safety_stock),
+			"pct": round(flt(r.actual_qty) / flt(r.safety_stock) * 100, 0) if flt(r.safety_stock) else 0,
+			"stock_uom": r.stock_uom,
 		}
-		for r in rows
-	]
+	return sorted(alerts.values(), key=lambda a: a["pct"])
 
 
-def _dio(company: str, days: int = 365) -> float:
-	"""Days Inventory Outstanding = (Stock Value / COGS) × Days."""
-	ref = getdate(today())
-	from_date = ref - timedelta(days=days)
-	# COGS approximation: sum of incoming_rate × qty on delivered/sold items
-	rows = frappe.db.sql(
-		"""
-		select coalesce(sum(sii.incoming_rate * sii.stock_qty), 0) as cogs
-		from `tabSales Invoice Item` sii
-		join `tabSales Invoice` si on si.name = sii.parent
-		where si.docstatus = 1 and si.company = %(company)s
-		  and si.posting_date between %(from)s and %(to)s
-		  and si.is_return = 0
-		""",
-		{"company": company, "from": from_date, "to": ref},
-		as_dict=True,
-	)
-	cogs = flt(rows[0]["cogs"]) if rows else 0.0
-	# current stock value
-	stock_rows = frappe.db.sql(
-		"""
-		select coalesce(sum(b.actual_qty * b.valuation_rate), 0) as val
-		from `tabBin` b
-		join `tabWarehouse` w on w.name = b.warehouse
-		where w.company = %(company)s and b.actual_qty > 0
-		""",
-		{"company": company},
-		as_dict=True,
-	)
-	stock_val = flt(stock_rows[0]["val"]) if stock_rows else 0.0
-	if cogs <= 0:
-		return 0.0
-	return round(stock_val / cogs * days, 0)
+# ── SNAPSHOT ────────────────────────────────────────────────────────────────
 
 
-# ── WHITELISTED ENDPOINTS (prepared-report cached) ────────────────────────
+def _compute_wc_snapshot(company: str, as_of: date | str) -> dict:
+	as_of = getdate(as_of)
+	bank = _bank_section(company, as_of)
+	ar = _party_side(company, "Customer", as_of)
+	ap = _party_side(company, "Supplier", as_of)
+	stock = _stock_section(company, as_of)
+	bns_ar = _run_bns("Customer", company, as_of)
+	bns_ap = _run_bns("Supplier", company, as_of)
 
-from company_dashboard.api.report_cache import get_or_compute as _cached
+	sales = _net_credit_sales(company, as_of)
+	purchases = _net_purchases(company, as_of)
+	cogs = _gl_cogs(company, as_of)
+	dso = _days(max(ar["net"], 0.0), sales)
+	dpo = _days(max(ap["net"], 0.0), purchases)
+	dio = _days(stock["stock_in_hand"], cogs)
+	ccc = (dso + dio - dpo) if None not in (dso, dio, dpo) else None
 
-
-@frappe.whitelist()
-def get_wc_overview() -> dict:
-	_require_wc_access()
-	return _cached("wc", "overview", _compute_wc_overview)
-
-
-def _compute_wc_overview() -> dict:
-	company = _default_company()
-
-	bank_accounts = _bank_balance_per_account(company)
-	total_bank = sum(a["balance"] for a in bank_accounts)
-
-	ar_data = _run_receivable_summary(company)
-	total_ar = _bns_ar_total(ar_data)
-
-	ap_data = _run_payable_summary(company)
-	total_ap = _bns_ap_total(ap_data)
-
-	stock_rows = frappe.db.sql(
-		"""
-		select coalesce(sum(b.actual_qty * b.valuation_rate), 0) as val
-		from `tabBin` b
-		join `tabWarehouse` w on w.name = b.warehouse
-		where w.company = %(company)s and b.actual_qty > 0
-		""",
-		{"company": company},
-		as_dict=True,
-	)
-	total_stock = flt(stock_rows[0]["val"]) if stock_rows else 0.0
-
-	nwc = total_bank + total_ar + total_stock - total_ap
-	dso = _dso(company, ar_total=total_ar)
-	dpo = _dpo(company, ap_total=total_ap)
-	dio = _dio(company)
-	ccc = dso + dio - dpo
-
-	return {
-		"company": company,
-		"as_of": today(),
-		"kpi": {
-			"net_working_capital": nwc,
-			"bank_balance": total_bank,
-			"trade_receivable": total_ar,
-			"trade_payable": total_ap,
-			"stock_in_hand": total_stock,
-			"ccc": ccc,
-			"dso": dso,
-			"dpo": dpo,
-			"dio": dio,
-		},
-		"bank_account_count": len(bank_accounts),
-	}
-
-
-@frappe.whitelist()
-def get_bank_detail() -> dict:
-	_require_wc_access()
-	return _cached("wc", "bank_detail", _compute_bank_detail)
-
-
-def _compute_bank_detail() -> dict:
-	company = _default_company()
-	accounts = _bank_balance_per_account(company)
-	total = sum(a["balance"] for a in accounts)
-	trend = _bank_monthly_trend(company, months=6)
-	burn = _cash_burn_rate(company)
-	days_cash = round(total / burn * 30, 0) if burn > 0 else 999
-	return {
-		"company": company,
-		"accounts": accounts,
-		"total_balance": total,
-		"account_count": len(accounts),
-		"trend": trend,
-		"cash_burn_monthly": burn,
-		"days_cash_on_hand": days_cash,
-	}
-
-
-@frappe.whitelist()
-def get_trade_receivable() -> dict:
-	_require_wc_access()
-	return _cached("wc", "trade_receivable", _compute_trade_receivable)
-
-
-def _compute_trade_receivable() -> dict:
-	company = _default_company()
-	data = _run_receivable_summary(company)
-	aging = _aggregate_aging(data)
-	top = _top_parties(data, limit=10)
-	dso = _dso(company)
-
-	ref = getdate(today())
-	month_start = ref.replace(day=1)
-	collected = frappe.db.sql(
-		"""
-		select coalesce(sum(pe.paid_amount), 0) as collected
-		from `tabPayment Entry` pe
-		where pe.docstatus = 1 and pe.company = %(company)s
-		  and pe.payment_type = 'Receive'
-		  and pe.posting_date >= %(from)s
-		  and pe.posting_date <= %(to)s
-		""",
-		{"company": company, "from": month_start, "to": ref},
-		as_dict=True,
-	)
-	collected_amt = flt(collected[0]["collected"]) if collected else 0.0
-	opening_ar = aging["total_outstanding"] + collected_amt
-	collection_efficiency = round(collected_amt / opening_ar * 100, 0) if opening_ar > 0 else 0
-
-	return {
-		"company": company,
-		"as_of": today(),
-		"aging": aging,
-		"top_debtors": top,
+	trade_wc = ar["net"] + stock["stock_in_hand"] - ap["net"]
+	ratios = {
 		"dso": dso,
-		"collection_efficiency": collection_efficiency,
-	}
-
-
-@frappe.whitelist()
-def get_trade_payable() -> dict:
-	_require_wc_access()
-	return _cached("wc", "trade_payable", _compute_trade_payable)
-
-
-def _compute_trade_payable() -> dict:
-	company = _default_company()
-	data = _run_payable_summary(company)
-	aging = _aggregate_aging(data)
-	top = _top_parties(data, limit=10)
-	dpo = _dpo(company)
-
-	advance = frappe.db.sql(
-		"""
-		select coalesce(sum(unallocated_amount), 0) as advance
-		from `tabPayment Entry`
-		where docstatus = 1 and company = %(company)s
-		  and payment_type = 'Pay'
-		  and party_type = 'Supplier'
-		  and unallocated_amount > 0
-		""",
-		{"company": company},
-		as_dict=True,
-	)
-	advance_paid = flt(advance[0]["advance"]) if advance else 0.0
-
-	return {
-		"company": company,
-		"as_of": today(),
-		"aging": aging,
-		"top_creditors": top,
 		"dpo": dpo,
-		"advance_paid": advance_paid,
+		"dio": dio,
+		"ccc": ccc,
+		"net_credit_sales_365d": sales,
+		"net_purchases_365d": purchases,
+		"cogs_365d": cogs,
 	}
+	ce = _collection_efficiency(company, ar, as_of)
+	reorder = _reorder_alerts(company)
+	meta = {"company": company, "as_of": as_of.isoformat()}
+
+	return {
+		"overview": {
+			**meta,
+			"kpi": {
+				"net_working_capital": trade_wc,
+				"trade_working_capital": trade_wc,
+				"working_capital_with_cash": trade_wc + bank["cash_and_bank"],
+				"working_capital_net_of_borrowings": trade_wc + bank["cash_and_bank"] + bank["borrowings"],
+				"bank_balance": bank["cash_and_bank"],
+				"cash_and_bank": bank["cash_and_bank"],
+				"borrowings": bank["borrowings"],
+				"gateway_receivables": bank["gateway_receivables"],
+				"trade_receivable": ar["net"],
+				"receivable_gross": ar["gross"],
+				"customer_advances": ar["advances"],
+				"trade_payable": ap["net"],
+				"payable_gross": ap["gross"],
+				"supplier_advances": ap["advances"],
+				"stock_in_hand": stock["stock_in_hand"],
+				"internal_receivable": ar["internal_accounts_total"],
+				"internal_payable": ap["internal_accounts_total"],
+				**ratios,
+			},
+			"bank_account_count": len([a for a in bank["accounts"] if a["kind"] in ("bank", "cash")]),
+		},
+		"bank": {
+			**meta,
+			**bank,
+			"total_balance": bank["cash_and_bank"],
+			"account_count": len(bank["accounts"]),
+		},
+		"receivable": {
+			**meta,
+			"total": ar["net"],
+			"gross": ar["gross"],
+			"advances": ar["advances"],
+			"internal_accounts_total": ar["internal_accounts_total"],
+			"excluded_parties_total": ar["excluded_parties_total"],
+			"aging": _ageing(bns_ar, ar["gross"]),
+			"top_debtors": _top_parties(ar, bns_ar, "Customer"),
+			"dso": dso,
+			"net_credit_sales_365d": sales,
+			**ce,
+		},
+		"payable": {
+			**meta,
+			"total": ap["net"],
+			"gross": ap["gross"],
+			"advances": ap["advances"],
+			"advance_paid": -ap["advances"],
+			"internal_accounts_total": ap["internal_accounts_total"],
+			"excluded_parties_total": ap["excluded_parties_total"],
+			"aging": _ageing(bns_ap, ap["gross"]),
+			"top_creditors": _top_parties(ap, bns_ap, "Supplier"),
+			"dpo": dpo,
+			"net_purchases_365d": purchases,
+		},
+		"stock": {
+			**meta,
+			**stock,
+			"total_stock_value": stock["stock_in_hand"],
+			"warehouse_count": _count_leaves(stock["warehouse_tree"]),
+			"reorder_alerts": reorder[:REORDER_LIST_LIMIT],
+			"reorder_count": len(reorder),
+			"dio": dio,
+			"cogs_365d": cogs,
+		},
+	}
+
+
+def _count_leaves(nodes: list[dict]) -> int:
+	return sum(1 if not n["is_group"] else _count_leaves(n["children"]) for n in nodes)
+
+
+def get_wc_snapshot(company: str | None = None) -> dict:
+	"""Cached snapshot (one per company per day). Shared by every WC endpoint and export."""
+	company = _resolve_company(company)
+	as_of = getdate(today())
+	return _cached(
+		"wc",
+		"snapshot",
+		lambda: _compute_wc_snapshot(company, as_of),
+		{"company": company, "as_of": as_of.isoformat()},
+		job=(
+			"company_dashboard.api.wc._compute_wc_snapshot",
+			{"company": company, "as_of": as_of.isoformat()},
+		),
+	)
+
+
+def _section(name: str, company: str | None) -> dict:
+	_require_wc_access()
+	snap = get_wc_snapshot(company)
+	return {**snap[name], "refreshed_at": snap.get("refreshed_at"), "stale": snap.get("stale", False)}
+
+
+# ── WHITELISTED ENDPOINTS ──────────────────────────────────────────────────
 
 
 @frappe.whitelist()
-def get_stock_detail() -> dict:
-	_require_wc_access()
-	return _cached("wc", "stock_detail", _compute_stock_detail)
+def get_wc_overview(company: str | None = None) -> dict:
+	return _section("overview", company)
 
 
-def _compute_stock_detail() -> dict:
-	company = _default_company()
-	by_group = _stock_by_item_group(company)
-	wh_tree = _stock_warehouse_tree(company)
-	total_stock = sum(g["stock_value"] for g in by_group)
-	reorder = _reorder_alerts(company)
-	dio = _dio(company)
+@frappe.whitelist()
+def get_bank_detail(company: str | None = None) -> dict:
+	return _section("bank", company)
 
-	def _count_leaves(nodes: list[dict]) -> int:
-		return sum(1 if not n["is_group"] else _count_leaves(n["children"]) for n in nodes)
 
-	return {
-		"company": company,
-		"total_stock_value": total_stock,
-		"by_item_group": by_group,
-		"warehouse_tree": wh_tree,
-		"warehouse_count": _count_leaves(wh_tree),
-		"reorder_alerts": reorder,
-		"reorder_count": len(reorder),
-		"dio": dio,
-	}
+@frappe.whitelist()
+def get_trade_receivable(company: str | None = None) -> dict:
+	return _section("receivable", company)
+
+
+@frappe.whitelist()
+def get_trade_payable(company: str | None = None) -> dict:
+	return _section("payable", company)
+
+
+@frappe.whitelist()
+def get_stock_detail(company: str | None = None) -> dict:
+	return _section("stock", company)

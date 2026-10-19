@@ -22,7 +22,7 @@ website_route_rules = [
 
 boot_session = "company_dashboard.boot.boot_session"
 
-after_install = "company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings.seed_defaults"
+after_install = "company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings.after_install"
 after_migrate = [
 	"company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings.seed_defaults"
 ]
@@ -157,13 +157,13 @@ after_migrate = [
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+# Ledger postings mark cached dashboard reports as stale (see api/report_cache.py).
+doc_events = {
+	"*": {
+		"on_submit": "company_dashboard.api.report_cache.bump_data_version",
+		"on_cancel": "company_dashboard.api.report_cache.bump_data_version",
+	}
+}
 
 # Scheduled Tasks
 # ---------------

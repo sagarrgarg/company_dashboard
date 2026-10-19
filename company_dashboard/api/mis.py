@@ -1,64 +1,69 @@
 """MIS dashboard API — real ERPNext metrics.
 
-Classification rules (this file is the single source of truth — keep it in sync with
-the UI labels and the P2/P3 APIs when they land):
+Rules (this file is the single source of truth — keep the UI labels in sync):
 
-- **B2C vs B2B** is decided by ``Item.custom_sales_intent`` (values ``B2C Retail``,
-  ``B2C Wholesale``, ``B2B Raw``, ``B2B Processed``). We match on the ``B2C`` / ``B2B``
-  prefix so new values that follow the convention keep working.
-- **Internal transfers are excluded** — any invoice whose customer has
-  ``is_internal_customer`` or ``is_bns_internal_customer`` set is dropped from every
-  revenue aggregation. This keeps inter-company stock movement from inflating MIS.
-- Revenue amounts are ``base_net_amount`` at line level (tax-exclusive, in company
-  currency) so mix and total reconcile exactly.
+- **Totals come from the GL.** Every P&L line below revenue is a GL figure for the
+  company and period (Period Closing Vouchers excluded, default finance book only).
+  Cost of goods = every ``Cost of Goods Sold`` and ``Stock Adjustment`` account. Any
+  P&L account not mapped to a bucket lands in "Other expenses" / "Other income", so
+  **PAT always equals GL net profit** (the response carries the residual to prove it).
+- **Revenue** is Sales Invoice lines, tax-exclusive (``base_net_amount``) in company
+  currency, **net of returns** (credit notes carry negative amounts and quantities),
+  booked to the configured Sales accounts, external customers only. Any difference to
+  the GL sales accounts is shown inside "Other income".
+- **Splits use the stock ledger.** B2C/B2B, SKU and segment cost is each line's posted
+  stock value (``−Σ stock_value_difference`` of the Sales Invoice or Delivery Note line).
+  The GL cost of goods not tied to a line (stock adjustments, JV/PI/PR/SE cost, flagged
+  lines, timing) is "unallocated cost of goods": on the overview it is shared by revenue,
+  on the SKU and segment pages it is a separate row. Splits therefore always sum to totals.
+- **Margins are always tax-exclusive.** Tax mode changes the revenue column only.
+- **Impossible lines are flagged, not counted.** A line whose cost is > 5× its revenue,
+  or whose unit cost is > 10× the item's median, is kept out of the split until reviewed.
+- **B2C vs B2B** is ``Item.custom_sales_intent`` (``B2C*`` / ``B2B*``); anything else is
+  "unclassified", which is returned at every tier.
+- **Internal transfers are excluded**: customers with ``is_internal_customer`` or
+  ``is_bns_internal_customer``.
+- **Comparisons** are against the same dates one year earlier, with a flag saying
+  whether the site has data for that whole window.
 """
 
 from __future__ import annotations
 
 import calendar
+from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
+from statistics import median
+from typing import NamedTuple
 
 import frappe
 from frappe import _
-from frappe.utils import add_months, flt, getdate, today
+from frappe.utils import add_months, flt, getdate, sbool, today
 
 from company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings import (
-	get_allowed_customer_groups,
+	_SEED_MAP,
+	COGS_ACCOUNT_TYPES,
+	PL_INCOME_ALLOWED_FIELDS,
+	get_account_meta,
 	get_configured_accounts,
+	get_mrp_price_list,
 	get_segment_root_map,
 )
 
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 TOP_N_CATEGORIES = 10
+BUCKETS = ("b2c", "b2b", "unclassified")
 
-# Reusable join+filter — every revenue query must use these to stay consistent.
-# Parameters expected in the containing query: %(from)s, %(to)s.
-SII_BASE_FROM = """
-	`tabSales Invoice Item` sii
-	join `tabSales Invoice`   si on si.name = sii.parent
-	left join `tabItem`       i  on i.name  = sii.item_code
-	left join `tabCustomer`   c  on c.name  = si.customer
-"""
-SII_BASE_WHERE = """
-	si.docstatus = 1
-	and si.is_return = 0
-	and si.posting_date between %(from)s and %(to)s
-	and coalesce(c.is_internal_customer, 0) = 0
-	and coalesce(c.is_bns_internal_customer, 0) = 0
-"""
-
-# Line amount expressions. Tax-inclusive pro-rates the invoice's grand-total back to
-# each line by its share of net_total, so totals reconcile to base_grand_total exactly
-# even with invoice-level discounts.
-AMT_EXCL = "sii.base_net_amount"
-AMT_INCL = (
-	"sii.base_net_amount * case when si.base_net_total > 0 "
-	"then si.base_grand_total / si.base_net_total else 1 end"
-)
-TAX_MODES = {"incl": AMT_INCL, "excl": AMT_EXCL}
-
+# Margins on less revenue than this are noise (a ₹0 SKU at −28,301,156%) — return null.
+MIN_REVENUE_FOR_PCT = 1_000.0
+# Line-level sanity guard (P7). A line is flagged when its stock cost is ≥ ANOMALY_MIN_COST
+# and either > ANOMALY_COST_TO_REVENUE × its revenue, or its unit cost is
+# > ANOMALY_UNIT_COST_TO_MEDIAN × the item's median unit cost (items with ≥ 3 lines).
+ANOMALY_MIN_COST = 500.0
+ANOMALY_COST_TO_REVENUE = 5.0
+ANOMALY_UNIT_COST_TO_MEDIAN = 10.0
+ANOMALY_LIST_LIMIT = 50
 
 # Strict allow-list. ``System Manager`` is kept because Frappe System Managers always
 # have implicit god access to the bench and can re-assign roles anyway — listing them
@@ -106,9 +111,7 @@ def _require_mis_access():
 		return
 	if not (set(frappe.get_roles(user)) & MIS_ACCESS_ROLES):
 		frappe.throw(
-			_("You need one of these roles to view MIS: {0}").format(
-				", ".join(sorted(MIS_ACCESS_ROLES))
-			),
+			_("You need one of these roles to view MIS: {0}").format(", ".join(sorted(MIS_ACCESS_ROLES))),
 			frappe.PermissionError,
 		)
 
@@ -129,8 +132,70 @@ def _require_wc_access():
 		)
 
 
+def has_wc_access(user: str | None = None) -> bool:
+	user = user or frappe.session.user
+	if user == "Administrator":
+		return True
+	return bool(set(frappe.get_roles(user)) & WC_ACCESS_ROLES)
+
+
 def _erpnext_installed() -> bool:
 	return "erpnext" in frappe.get_installed_apps()
+
+
+# ── Company ─────────────────────────────────────────────────────────────────
+
+
+def _allowed_companies() -> set[str] | None:
+	"""Companies the user is restricted to via User Permissions; None = unrestricted."""
+	if frappe.session.user == "Administrator":
+		return None
+	from frappe.permissions import get_user_permissions
+
+	rows = (get_user_permissions(frappe.session.user) or {}).get("Company") or []
+	names = {r.get("doc") for r in rows if r.get("doc")}
+	return names or None
+
+
+def _resolve_company(company: str | None = None) -> str:
+	"""Validated company for a request. Explicit ``company`` must exist and be allowed for
+	the user; otherwise the user default, then the global default, then the first company."""
+	allowed = _allowed_companies()
+	if company:
+		if not frappe.db.exists("Company", company):
+			frappe.throw(_("Company {0} does not exist.").format(company))
+		if allowed is not None and company not in allowed:
+			frappe.throw(_("You are not allowed to view {0}.").format(company), frappe.PermissionError)
+		return company
+	for candidate in (
+		frappe.defaults.get_user_default("Company"),
+		frappe.defaults.get_global_default("company"),
+	):
+		if candidate and frappe.db.exists("Company", candidate) and (allowed is None or candidate in allowed):
+			return candidate
+	if allowed:
+		return sorted(allowed)[0]
+	names = frappe.get_all("Company", pluck="name", order_by="creation asc", limit=1)
+	if not names:
+		frappe.throw(_("No Company is set up on this site."))
+	return names[0]
+
+
+# Kept for callers that predate the ``company`` parameter.
+def _default_company() -> str:
+	return _resolve_company(None)
+
+
+@frappe.whitelist()
+def get_companies() -> list[str]:
+	"""Companies the user may pick in the dashboard."""
+	_require_dashboard_access()
+	allowed = _allowed_companies()
+	names = frappe.get_all("Company", pluck="name", order_by="company_name asc")
+	return [n for n in names if allowed is None or n in allowed]
+
+
+# ── Period ──────────────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -140,514 +205,476 @@ class Period:
 	prior_from: date
 	prior_to: date
 	label: str
+	kind: str  # "ttm" | "fy" | "custom"
 
-	def as_dict(self) -> dict:
-		return {
-			"from": self.from_date.isoformat(),
-			"to": self.to_date.isoformat(),
-			"label": self.label,
-		}
+
+def _shift_year(d: date, is_end: bool) -> date:
+	"""Same date one year earlier. A month-end stays a month-end (29 Feb ↔ 28 Feb)."""
+	shifted = getdate(add_months(d, -12))
+	if is_end and d.day == calendar.monthrange(d.year, d.month)[1]:
+		shifted = shifted.replace(day=calendar.monthrange(shifted.year, shifted.month)[1])
+	return shifted
+
+
+def _build_period(from_date: date, to_date: date, kind: str, label: str) -> Period:
+	return Period(
+		from_date,
+		to_date,
+		_shift_year(from_date, is_end=False),
+		_shift_year(to_date, is_end=True),
+		label,
+		kind,
+	)
 
 
 def _ttm_window(anchor: date | None = None) -> Period:
-	"""Trailing 12 months ending on the last day of the current month."""
+	"""Last 12 calendar months: the 1st of the month 11 months back through today (the
+	current month is month-to-date, never future days)."""
 	ref = anchor or getdate(today())
-	last_day = calendar.monthrange(ref.year, ref.month)[1]
-	to_date = ref.replace(day=last_day)
-	from_date = getdate(add_months(to_date.replace(day=1), -11))
-	return _build_period(from_date, to_date, label_prefix="Trailing 12 months")
-
-
-def _ttm_cache_anchor(from_date: str | None, to_date: str | None) -> dict:
-	"""Cache-key fragment that pins the trailing-12-months window to the current month.
-
-	When ``from_date``/``to_date`` are omitted the endpoint computes a TTM window anchored
-	on ``today()``, but the prepared-report cache key drops ``None`` params — so without an
-	anchor the key is date-less and (given the 24h TTL) keeps serving the previous month's
-	window after a period rollover. Returns ``{}`` for explicit ranges (already in the key)
-	so their keys are unchanged."""
-	if from_date and to_date:
-		return {}
-	return {"ttm_anchor": _ttm_window().to_date.isoformat()}
+	from_date = getdate(add_months(ref.replace(day=1), -11))
+	label = f"Last 12 months · {from_date.strftime('%b %Y')} – {ref.strftime('%d %b %Y')}"
+	return _build_period(from_date, ref, "ttm", label)
 
 
 def _custom_window(from_date: date, to_date: date) -> Period:
-	"""User-selected range. Prior period is the immediately-preceding same-length window."""
+	"""User-selected range. Named fiscal years get their name as the label."""
 	if to_date < from_date:
 		from_date, to_date = to_date, from_date
-	return _build_period(from_date, to_date, label_prefix="Custom")
-
-
-def _build_period(from_date: date, to_date: date, label_prefix: str) -> Period:
-	"""Construct a Period with its prior-period window computed as the same-length
-	immediately-preceding window (so YoY/prior deltas stay apples-to-apples on ranges
-	that aren't exactly 12 months)."""
-	span_days = (to_date - from_date).days
-	prior_to = getdate(from_date) - timedelta(days=1)
-	prior_from = prior_to - timedelta(days=span_days)
-	label = (
-		f"{label_prefix} · {from_date.strftime('%b %Y')} – {to_date.strftime('%b %Y')}"
-		if label_prefix
-		else f"{from_date.isoformat()} – {to_date.isoformat()}"
+	fy = frappe.db.get_value(
+		"Fiscal Year", {"year_start_date": from_date, "year_end_date": to_date, "disabled": 0}, "name"
 	)
-	return Period(from_date, to_date, prior_from, prior_to, label)
+	if fy:
+		return _build_period(from_date, to_date, "fy", f"FY {fy}")
+	label = f"{from_date.strftime('%d %b %Y')} – {to_date.strftime('%d %b %Y')}"
+	return _build_period(from_date, to_date, "custom", label)
 
 
-def _intent_bucket_expr(alias: str = "bucket") -> str:
-	"""SQL CASE that collapses ``custom_sales_intent`` into (b2c, b2b, unclassified)."""
-	return f"""
-		case
-			when i.custom_sales_intent like 'B2C%%' then 'b2c'
-			when i.custom_sales_intent like 'B2B%%' then 'b2b'
-			else 'unclassified'
-		end as {alias}
-	"""
+def _period_for(from_date: str | None, to_date: str | None) -> Period:
+	if from_date and to_date:
+		return _custom_window(getdate(from_date), getdate(to_date))
+	return _ttm_window()
 
 
-def _revenue_by_bucket(from_date: date, to_date: date, amt_expr: str) -> dict[str, float]:
-	"""Sum per-line amount by (b2c | b2b | unclassified) bucket."""
-	rows = frappe.db.sql(
-		f"""
-		select
-			{_intent_bucket_expr()},
-			coalesce(sum({amt_expr}), 0) as amt
-		from {SII_BASE_FROM}
-		where {SII_BASE_WHERE}
-		group by bucket
-		""",
-		{"from": from_date, "to": to_date},
-		as_dict=True,
+def _ttm_cache_anchor(from_date: str | None, to_date: str | None) -> dict:
+	"""Cache-key fragment pinning the default window to today's date (the window ends
+	today). Explicit ranges are already in the key."""
+	if from_date and to_date:
+		return {}
+	return {"ttm_anchor": getdate(today()).isoformat()}
+
+
+def _sales_data_start(company: str) -> date | None:
+	"""First submitted Sales Invoice date for the company (cached for an hour)."""
+	key = f"company_dashboard|sales_data_start|{company}"
+	cached = frappe.cache().get_value(key, expires=True)
+	if cached:
+		return getdate(cached)
+	row = frappe.db.sql(
+		"select min(posting_date) from `tabSales Invoice` where company = %s and docstatus = 1", company
 	)
-	out = {"b2c": 0.0, "b2b": 0.0, "unclassified": 0.0}
-	for row in rows:
-		out[row["bucket"]] = flt(row["amt"])
-	out["total"] = out["b2c"] + out["b2b"] + out["unclassified"]
-	return out
+	start = row[0][0] if row and row[0][0] else None
+	if start:
+		frappe.cache().set_value(key, start.isoformat(), expires_in_sec=3600)
+	return getdate(start) if start else None
 
 
-def _monthly_revenue(period: Period, amt_expr: str) -> list[dict]:
-	"""Per-month line-level totals in ₹L, split by custom_sales_intent bucket."""
-	rows = frappe.db.sql(
-		f"""
-		select
-			year(si.posting_date)                 as yr,
-			month(si.posting_date)                as mo,
-			{_intent_bucket_expr()},
-			coalesce(sum({amt_expr}), 0) as amt
-		from {SII_BASE_FROM}
-		where {SII_BASE_WHERE}
-		group by yr, mo, bucket
-		""",
-		{"from": period.from_date, "to": period.to_date},
-		as_dict=True,
-	)
-	buckets: dict[tuple[int, int], dict] = {}
-	cursor = period.from_date.replace(day=1)
-	while cursor <= period.to_date:
-		buckets[(cursor.year, cursor.month)] = {
-			"month": MONTH_ABBR[cursor.month - 1],
-			"year": cursor.year,
-			"b2c": 0.0,
-			"b2b": 0.0,
-			"other": 0.0,
-			"total": 0.0,
-		}
-		cursor = getdate(add_months(cursor, 1))
-
-	for row in rows:
-		key = (int(row["yr"]), int(row["mo"]))
-		if key not in buckets:
-			continue
-		amt_lakhs = round(flt(row["amt"]) / 1_00_000, 2)
-		bucket = buckets[key]
-		bucket["total"] = round(bucket["total"] + amt_lakhs, 2)
-		if row["bucket"] == "b2c":
-			bucket["b2c"] = amt_lakhs
-		elif row["bucket"] == "b2b":
-			bucket["b2b"] = amt_lakhs
-		else:
-			bucket["other"] = amt_lakhs
-
-	return [buckets[k] for k in sorted(buckets.keys())]
-
-
-def _categories_from_item_group(period: Period, amt_expr: str) -> list[dict]:
-	"""Top-N categories by revenue (Item.item_group). Rest collapses into 'Other'."""
-	rows = frappe.db.sql(
-		f"""
-		select
-			coalesce(i.item_group, 'Unclassified') as category,
-			count(distinct sii.item_code)          as sku_count,
-			coalesce(sum({amt_expr}), 0)           as revenue
-		from {SII_BASE_FROM}
-		where {SII_BASE_WHERE}
-		group by category
-		order by revenue desc
-		""",
-		{"from": period.from_date, "to": period.to_date},
-		as_dict=True,
-	)
-	top = rows[:TOP_N_CATEGORIES]
-	rest = rows[TOP_N_CATEGORIES:]
-	out = [
-		{
-			"category": r["category"],
-			"sku_count": int(r["sku_count"]),
-			"revenue": round(flt(r["revenue"]) / 1_00_000, 2),
-		}
-		for r in top
-	]
-	if rest:
-		out.append(
-			{
-				"category": "Other",
-				"sku_count": sum(int(r["sku_count"]) for r in rest),
-				"revenue": round(sum(flt(r["revenue"]) for r in rest) / 1_00_000, 2),
-			}
-		)
-	return out
-
-
-def _active_sku_stats(period: Period) -> tuple[int, float]:
-	"""(active_skus, avg_mrp)."""
-	active = frappe.db.sql(
-		f"""
-		select count(distinct sii.item_code)
-		from {SII_BASE_FROM}
-		where {SII_BASE_WHERE}
-		""",
-		{"from": period.from_date, "to": period.to_date},
-	)
-	active_count = int(active[0][0]) if active and active[0][0] is not None else 0
-	avg_mrp = frappe.db.sql(
-		"select coalesce(avg(standard_rate), 0) from `tabItem` where disabled = 0 and standard_rate > 0"
-	)
-	return active_count, flt(avg_mrp[0][0]) if avg_mrp else 0.0
-
-
-def _gross_margin(period: Period, amt_expr: str) -> dict:
-	"""Gross-profit per bucket (overall + b2c + b2b) restricted to valuated lines.
-
-	**Effective cost per line** is ``coalesce(nullif(sii.incoming_rate, 0), dni.incoming_rate, 0)``:
-	when a Sales Invoice is drawn from a Delivery Note the stock movement — and hence
-	the valuation — lives on the DN. ERPNext usually copies ``incoming_rate`` to the
-	SI line, but it's zero in a non-trivial number of rows (on this dataset: ~10% of
-	DN-linked lines), so we fall back to the linked ``Delivery Note Item`` to recover
-	the cost. Lines where both are zero (service items, un-valuated stock) are treated
-	as "unknown cost" — we exclude their revenue from the denominator rather than
-	pretending they have 100% margin, and report the coverage ratio so the UI can
-	flag low-confidence margins.
-
-	Margin is always computed on ``AMT_EXCL`` (net of GST) regardless of the display
-	tax mode — see caller in ``get_overview``.
-	"""
-	cost_expr = "coalesce(nullif(sii.incoming_rate, 0), dni.incoming_rate, 0)"
-	rows = frappe.db.sql(
-		f"""
-		select
-			{_intent_bucket_expr()},
-			coalesce(sum({amt_expr}), 0)                                              as rev_total,
-			coalesce(sum(case when {cost_expr} > 0 then {amt_expr} else 0 end), 0)    as rev_valuated,
-			coalesce(sum({cost_expr} * sii.stock_qty), 0)                             as cogs
-		from {SII_BASE_FROM}
-		left join `tabDelivery Note Item` dni on dni.name = sii.dn_detail
-		where {SII_BASE_WHERE}
-		group by bucket
-		""",
-		{"from": period.from_date, "to": period.to_date},
-		as_dict=True,
-	)
-
-	def _pack(rev_total: float, rev_val: float, cogs: float) -> dict:
-		gp = rev_val - cogs
-		pct = (gp / rev_val * 100) if rev_val else 0.0
-		coverage = (rev_val / rev_total * 100) if rev_total else 0.0
-		return {
-			"gross_profit": gp,
-			"gross_margin_pct": pct,
-			"coverage_pct": coverage,
-			"rev_valuated": rev_val,
-		}
-
-	bucketed = {b: _pack(0, 0, 0) for b in ("b2c", "b2b", "unclassified")}
-	tot_rev = tot_val = tot_cogs = 0.0
-	for row in rows:
-		b = row["bucket"]
-		r_total = flt(row["rev_total"])
-		r_val = flt(row["rev_valuated"])
-		c = flt(row["cogs"])
-		tot_rev += r_total
-		tot_val += r_val
-		tot_cogs += c
-		if b in bucketed:
-			bucketed[b] = _pack(r_total, r_val, c)
-
-	overall = _pack(tot_rev, tot_val, tot_cogs)
+def _period_dict(period: Period, company: str) -> dict:
+	"""Period + prior-window coverage, so the UI can hide comparisons that aren't fair."""
+	start = _sales_data_start(company)
+	days = (period.prior_to - period.prior_from).days + 1
+	if start is None or period.prior_to < start:
+		covered = 0
+	elif period.prior_from >= start:
+		covered = days
+	else:
+		covered = (period.prior_to - start).days + 1
+	coverage = round(covered / days * 100, 1) if days > 0 else 0.0
+	month_end = calendar.monthrange(period.to_date.year, period.to_date.month)[1]
 	return {
-		"gross_profit": overall["gross_profit"],
-		"gross_margin_pct": overall["gross_margin_pct"],
-		"coverage_pct": overall["coverage_pct"],
-		"rev_valuated": overall["rev_valuated"],
-		"b2c": bucketed["b2c"],
-		"b2b": bucketed["b2b"],
+		"from": period.from_date.isoformat(),
+		"to": period.to_date.isoformat(),
+		"label": period.label,
+		"kind": period.kind,
+		"days": (period.to_date - period.from_date).days + 1,
+		"is_12_months": _is_12_months(period),
+		"last_month_partial": period.to_date.day != month_end,
+		"comparison_label": _("vs same period last year"),
+		"prior": {
+			"from": period.prior_from.isoformat(),
+			"to": period.prior_to.isoformat(),
+			"available": coverage >= 100.0,
+			"coverage_pct": coverage,
+			"data_starts": start.isoformat() if start else None,
+		},
 	}
 
 
-def _gl_spend(accounts: list[str], from_date: date, to_date: date, company: str | None) -> float:
-	"""Net GL spend (debit − credit) against a set of expense accounts in the window.
+def _is_12_months(period: Period) -> bool:
+	nxt = getdate(add_months(period.from_date, 12))
+	return abs((nxt - period.to_date).days) <= 31
 
-	Using ``debit - credit`` so credit notes / reversal journals reduce the amount
-	instead of inflating it. Expense accounts have natural debit balances so this
-	returns a positive number when money went out.
-	"""
-	if not accounts:
-		return 0.0
-	params: dict[str, object] = {
-		"accounts": tuple(accounts),
-		"from": from_date,
-		"to": to_date,
+
+# ── SQL building blocks ─────────────────────────────────────────────────────
+
+SII_BASE_FROM = """
+	`tabSales Invoice Item` sii
+	join `tabSales Invoice`   si on si.name = sii.parent
+	left join `tabItem`       i  on i.name  = sii.item_code
+	left join `tabCustomer`   c  on c.name  = si.customer
+"""
+
+# Line amount expressions. Tax-inclusive pro-rates the invoice's grand total back to each
+# line by its share of net_total (returns included: both totals are negative there).
+AMT_EXCL = "sii.base_net_amount"
+AMT_INCL = (
+	"sii.base_net_amount * case when si.base_net_total != 0 "
+	"then si.base_grand_total / si.base_net_total else 1 end"
+)
+TAX_MODES = ("incl", "excl")
+
+# Stock-ledger cost of one Sales Invoice line (NULL = no stock movement, i.e. unvalued):
+#  - SI with update_stock: the SI line's own stock ledger entries;
+#  - billed from a DN line: that DN line's entries, pro-rated by the billed quantity;
+#  - DN made against the SI: the DN lines pointing back at this SI line.
+# Cancelled entries are excluded. Reposts update these values, unlike sii.incoming_rate.
+# Stock-ledger cost of one Sales Invoice line (NULL = unvalued):
+#  - SI with update_stock: the SI line's own stock ledger entries;
+#  - billed from a DN line: that DN line's entries, pro-rated by billed quantity. A credit
+#    note pointing at an ordinary (non-return) DN line moved no stock, so it is unvalued;
+#  - DN made against the SI: the DN lines pointing back at this SI line;
+#  - SO billed and delivered separately: the average cost per unit of the SO line's
+#    deliveries × billed quantity (what ERPNext's Gross Profit report does).
+# Cancelled entries are excluded. Reposts update these values, unlike sii.incoming_rate.
+# Lines whose cost posts to an account that isn't cost of goods (e.g. samples booked to
+# Marketing) are unvalued here: the GL already counts that cost in its own bucket.
+LINE_COST_JOINS = """
+	left join `tabDelivery Note Item` dni on dni.name = sii.dn_detail
+	left join `tabAccount` ea on ea.name = coalesce(nullif(dni.expense_account, ''), sii.expense_account)
+"""
+LINE_COST = """
+	case
+		when si.update_stock = 1 then (
+			select -sum(sle.stock_value_difference)
+			from `tabStock Ledger Entry` sle
+			where sle.voucher_detail_no = sii.name and sle.voucher_type = 'Sales Invoice'
+			  and sle.voucher_no = si.name and sle.is_cancelled = 0
+		)
+		when coalesce(sii.dn_detail, '') != '' then
+			case when sii.stock_qty < 0 and coalesce(dni.stock_qty, 0) > 0 then null else (
+				select -sum(sle.stock_value_difference)
+				from `tabStock Ledger Entry` sle
+				where sle.voucher_detail_no = sii.dn_detail and sle.voucher_type = 'Delivery Note'
+				  and sle.is_cancelled = 0
+			) * case when coalesce(dni.stock_qty, 0) != 0 then sii.stock_qty / dni.stock_qty else 1 end end
+		else coalesce(
+			(
+				select -sum(sle.stock_value_difference)
+				from `tabDelivery Note Item` d
+				join `tabStock Ledger Entry` sle
+				  on sle.voucher_type = 'Delivery Note' and sle.voucher_detail_no = d.name and sle.is_cancelled = 0
+				where d.si_detail = sii.name and d.docstatus = 1
+			),
+			case when sii.stock_qty > 0 and coalesce(sii.so_detail, '') != '' then (
+				select -sum(sle.stock_value_difference)
+				from `tabDelivery Note Item` d
+				join `tabStock Ledger Entry` sle
+				  on sle.voucher_type = 'Delivery Note' and sle.voucher_detail_no = d.name and sle.is_cancelled = 0
+				where d.so_detail = sii.so_detail and d.docstatus = 1 and d.stock_qty > 0
+				  and coalesce(d.si_detail, '') = ''
+			) / (
+				select nullif(sum(d.stock_qty), 0)
+				from `tabDelivery Note Item` d
+				where d.so_detail = sii.so_detail and d.docstatus = 1 and d.stock_qty > 0
+				  and coalesce(d.si_detail, '') = ''
+			) * sii.stock_qty end
+		)
+	end
+"""
+COGS_TYPES_SQL = "('Cost of Goods Sold', 'Stock Adjustment')"
+
+
+def _intent_col() -> str:
+	"""``Item.custom_sales_intent`` when the site has it, else NULL (all unclassified)."""
+	return "i.custom_sales_intent" if frappe.db.has_column("Item", "custom_sales_intent") else "null"
+
+
+def _intent_bucket_sql(alias: str = "bucket") -> str:
+	col = _intent_col()
+	return (
+		f"case when {col} like 'B2C%%' then 'b2c' when {col} like 'B2B%%' then 'b2b' "
+		f"else 'unclassified' end as {alias}"
+	)
+
+
+def _internal_customer_sql() -> str:
+	parts = ["coalesce(c.is_internal_customer, 0) = 0"]
+	if frappe.db.has_column("Customer", "is_bns_internal_customer"):
+		parts.append("coalesce(c.is_bns_internal_customer, 0) = 0")
+	return "(" + " and ".join(parts) + ")"
+
+
+def _sales_accounts() -> list[str]:
+	return get_configured_accounts("sales_income_accounts")
+
+
+def _base_where(params: dict, company: str, from_date: date, to_date: date, internal: bool = False) -> str:
+	"""WHERE clause every revenue query shares. Returns are included (they net out)."""
+	params.update({"company": company, "from": from_date, "to": to_date})
+	clauses = [
+		"si.docstatus = 1",
+		"coalesce(si.is_opening, 'No') != 'Yes'",
+		"si.company = %(company)s",
+		"si.posting_date between %(from)s and %(to)s",
+		f"not {_internal_customer_sql()}" if internal else _internal_customer_sql(),
+	]
+	sales = _sales_accounts()
+	if sales:
+		params["sales_accounts"] = tuple(sales)
+		clauses.append("sii.income_account in %(sales_accounts)s")
+	return " and ".join(clauses)
+
+
+def _segment_sql() -> str:
+	"""Customer group as it was on the invoice, falling back to today's group."""
+	return "coalesce(nullif(si.customer_group, ''), c.customer_group, '(unassigned)')"
+
+
+def _pct(num: float | None, den: float | None) -> float | None:
+	"""num / den × 100, or None when the denominator is too small to mean anything."""
+	if num is None or den is None or abs(den) < MIN_REVENUE_FOR_PCT:
+		return None
+	return num / den * 100
+
+
+# ── Line-level sales (single source for every split) ───────────────────────
+
+
+class SalesLine(NamedTuple):
+	invoice: str
+	item_code: str
+	item_name: str
+	item_group: str
+	intent: str | None
+	bucket: str
+	is_stock_item: int
+	stock_uom: str
+	customer: str
+	customer_name: str
+	segment: str
+	month: str  # "YYYY-MM"
+	rev_excl: float
+	rev_incl: float
+	stock_qty: float
+	cost: float | None  # stock-ledger cost; None = no stock movement
+	flagged: bool
+
+	def rev(self, mode: str) -> float:
+		return self.rev_incl if mode == "incl" else self.rev_excl
+
+	@property
+	def allocated_cost(self) -> float:
+		"""Cost counted in splits: unvalued and flagged lines contribute nothing."""
+		return 0.0 if (self.cost is None or self.flagged) else self.cost
+
+	@property
+	def valued(self) -> bool:
+		return self.cost is not None and not self.flagged
+
+
+def _sales_lines(company: str, from_date: date, to_date: date) -> list[SalesLine]:
+	"""Every external Sales Invoice line in the window with its stock-ledger cost.
+	Memoised per request — overview, SKU and segment exports share one fetch."""
+	memo = getattr(frappe.local, "company_dashboard_lines", None)
+	if memo is None:
+		memo = frappe.local.company_dashboard_lines = {}
+	key = (company, from_date, to_date, tuple(_sales_accounts()))
+	if key in memo:
+		return memo[key]
+
+	params: dict = {}
+	where = _base_where(params, company, from_date, to_date)
+	raw = frappe.db.sql(
+		f"""
+		select
+			si.name,
+			sii.item_code,
+			coalesce(i.item_name, sii.item_name, sii.item_code),
+			coalesce(i.item_group, sii.item_group, 'Unclassified'),
+			{_intent_col()},
+			{_intent_bucket_sql()},
+			coalesce(i.is_stock_item, 0),
+			coalesce(nullif(sii.stock_uom, ''), i.stock_uom, ''),
+			si.customer,
+			coalesce(c.customer_name, si.customer_name, si.customer),
+			{_segment_sql()},
+			date_format(si.posting_date, '%%Y-%%m'),
+			coalesce({AMT_EXCL}, 0),
+			coalesce({AMT_INCL}, 0),
+			coalesce(sii.stock_qty, 0),
+			{LINE_COST},
+			coalesce(ea.account_type, '') in {COGS_TYPES_SQL}
+		from {SII_BASE_FROM}
+		{LINE_COST_JOINS}
+		where {where}
+		""",
+		params,
+	)
+
+	# Cost posted outside cost of goods is not part of the split (see LINE_COST).
+	raw = [r if (r[15] is None or r[16]) else (*r[:15], None, r[16]) for r in raw]
+
+	unit_costs: dict[str, list[float]] = defaultdict(list)
+	for r in raw:
+		cost, qty = r[15], flt(r[14])
+		if cost is not None and qty and flt(cost) > 0:
+			unit_costs[r[1]].append(abs(flt(cost)) / abs(qty))
+	medians = {item: median(v) for item, v in unit_costs.items() if len(v) >= 3}
+
+	lines: list[SalesLine] = []
+	for r in raw:
+		cost = None if r[15] is None else flt(r[15])
+		rev_excl, qty = flt(r[12]), flt(r[14])
+		flagged = False
+		if cost is not None and abs(cost) >= ANOMALY_MIN_COST:
+			if rev_excl and abs(cost) > ANOMALY_COST_TO_REVENUE * abs(rev_excl):
+				flagged = True
+			else:
+				med = medians.get(r[1])
+				if med and qty and abs(cost) / abs(qty) > ANOMALY_UNIT_COST_TO_MEDIAN * med:
+					flagged = True
+		lines.append(
+			SalesLine(
+				invoice=r[0],
+				item_code=r[1],
+				item_name=r[2],
+				item_group=r[3],
+				intent=r[4],
+				bucket=r[5],
+				is_stock_item=int(r[6] or 0),
+				stock_uom=r[7] or "",
+				customer=r[8],
+				customer_name=r[9],
+				segment=r[10],
+				month=r[11],
+				rev_excl=rev_excl,
+				rev_incl=flt(r[13]),
+				stock_qty=qty,
+				cost=cost,
+				flagged=flagged,
+			)
+		)
+	memo[key] = lines
+	return lines
+
+
+def _coverage(lines) -> float | None:
+	"""Share of positive (non-return) sales value whose cost is known. Warning only."""
+	sold = sum(ln.rev_excl for ln in lines if ln.rev_excl > 0)
+	valued = sum(ln.rev_excl for ln in lines if ln.rev_excl > 0 and ln.valued)
+	return _pct(valued, sold)
+
+
+def _anomalies(lines: list[SalesLine]) -> list[dict]:
+	flagged = sorted((ln for ln in lines if ln.flagged), key=lambda ln: abs(ln.cost or 0), reverse=True)
+	return [
+		{
+			"invoice": ln.invoice,
+			"item_code": ln.item_code,
+			"item_name": ln.item_name,
+			"customer": ln.customer,
+			"month": ln.month,
+			"qty": ln.stock_qty,
+			"revenue": ln.rev_excl,
+			"cost": ln.cost,
+			"unit_cost": (ln.cost / ln.stock_qty) if ln.stock_qty else None,
+		}
+		for ln in flagged[:ANOMALY_LIST_LIMIT]
+	]
+
+
+def _quality(lines: list[SalesLine]) -> dict:
+	flagged = [ln for ln in lines if ln.flagged]
+	return {
+		"coverage_pct": _coverage(lines),
+		"flagged_lines": len(flagged),
+		"flagged_cost": sum(ln.cost or 0 for ln in flagged),
+		"flagged_revenue": sum(ln.rev_excl for ln in flagged),
+		"anomalies": _anomalies(lines),
+		"rules": {
+			"min_revenue_for_pct": MIN_REVENUE_FOR_PCT,
+			"min_cost": ANOMALY_MIN_COST,
+			"cost_to_revenue": ANOMALY_COST_TO_REVENUE,
+			"unit_cost_to_median": ANOMALY_UNIT_COST_TO_MEDIAN,
+		},
 	}
-	company_clause = ""
-	if company:
-		company_clause = "and ge.company = %(company)s"
-		params["company"] = company
+
+
+def _revenue_by_bucket(company: str, from_date: date, to_date: date, mode: str) -> dict[str, float]:
+	"""Revenue per bucket straight from SQL (used for the prior window)."""
+	params: dict = {}
+	amt = AMT_INCL if mode == "incl" else AMT_EXCL
 	rows = frappe.db.sql(
 		f"""
-		select coalesce(sum(ge.debit - ge.credit), 0) as amt
-		from `tabGL Entry` ge
-		where ge.account in %(accounts)s
-		  and ge.posting_date between %(from)s and %(to)s
-		  and coalesce(ge.is_cancelled, 0) = 0
-		  {company_clause}
+		select {_intent_bucket_sql()}, coalesce(sum({amt}), 0) as amt
+		from {SII_BASE_FROM}
+		where {_base_where(params, company, from_date, to_date)}
+		group by bucket
 		""",
 		params,
 		as_dict=True,
 	)
-	return flt(rows[0]["amt"]) if rows else 0.0
+	out = dict.fromkeys(BUCKETS, 0.0)
+	for row in rows:
+		out[row["bucket"]] = flt(row["amt"])
+	out["total"] = sum(out[b] for b in BUCKETS)
+	return out
 
 
-def _ebitda_ebit_pat(
-	period: Period,
-	company: str,
-	rev_buckets_excl: dict[str, float],
-	cm3_overall: float,
-	cm3_b2c: float,
-	cm3_b2b: float,
-) -> dict:
-	"""Below-CM3 P&L ladder: EBITDA → EBIT → PBT → PAT.
-
-	::
-	   EBITDA = CM3   − Salary − Rent − Utilities − Admin           (fixed operating)
-	   EBIT   = EBITDA − Depreciation & Amortization                (capex absorption)
-	   PBT    = EBIT   − Interest & Finance Cost                    (below-the-line)
-	   PAT    = PBT    − Income Tax Expense                         (profit after tax)
-
-	All four deductions come from GL Entry against admin-configured account multiselects.
-	GL has no B2C/B2B dimension, so bucket figures use tax-exclusive revenue-share
-	allocation — aggregate values are exact; per-bucket carries that caveat. The
-	intermediate PBT isn't shown on the dashboard (it sits inside this function's
-	response for callers that want it) — the UI jumps EBIT → PAT with the Interest
-	and Tax amounts visible in the tile meta + provenance footer.
-	"""
-	operating_accounts = {
-		"salary": get_configured_accounts("salary_accounts"),
-		"rent": get_configured_accounts("rent_accounts"),
-		"utility": get_configured_accounts("utility_accounts"),
-		"admin": get_configured_accounts("admin_overhead_accounts"),
-	}
-	da_accounts = get_configured_accounts("depreciation_amortization_accounts")
-	interest_accounts = get_configured_accounts("interest_and_finance_accounts")
-	tax_accounts = get_configured_accounts("tax_expense_accounts")
-
-	def _spend(accounts: list[str]) -> float:
-		return _gl_spend(accounts, period.from_date, period.to_date, company)
-
-	salary_total = _spend(operating_accounts["salary"])
-	rent_total = _spend(operating_accounts["rent"])
-	utility_total = _spend(operating_accounts["utility"])
-	admin_total = _spend(operating_accounts["admin"])
-	operating_total = salary_total + rent_total + utility_total + admin_total
-	da_total = _spend(da_accounts)
-	interest_total = _spend(interest_accounts)
-	tax_total = _spend(tax_accounts)
-
-	rev_overall = rev_buckets_excl.get("total", 0.0)
-	rev_b2c = rev_buckets_excl.get("b2c", 0.0)
-	rev_b2b = rev_buckets_excl.get("b2b", 0.0)
-
-	def _share(part: float) -> float:
-		return (part / rev_overall) if rev_overall else 0.0
-
-	def _pack(cm3: float, rev: float, share: float) -> dict:
-		ebitda = cm3 - operating_total * share
-		ebit = ebitda - da_total * share
-		pbt = ebit - interest_total * share
-		pat = pbt - tax_total * share
-
-		def _pct(x: float) -> float:
-			return (x / rev * 100) if rev else 0.0
-
-		return {
-			"ebitda": ebitda,
-			"ebitda_pct": _pct(ebitda),
-			"ebit": ebit,
-			"ebit_pct": _pct(ebit),
-			"pbt": pbt,
-			"pbt_pct": _pct(pbt),
-			"pat": pat,
-			"pat_pct": _pct(pat),
-		}
-
-	return {
-		"overall": _pack(cm3_overall, rev_overall, 1.0),
-		"b2c": _pack(cm3_b2c, rev_b2c, _share(rev_b2c)),
-		"b2b": _pack(cm3_b2b, rev_b2b, _share(rev_b2b)),
-		"inputs": {
-			"salary_total": salary_total,
-			"rent_total": rent_total,
-			"utility_total": utility_total,
-			"admin_total": admin_total,
-			"operating_total": operating_total,
-			"da_total": da_total,
-			"interest_total": interest_total,
-			"tax_total": tax_total,
-			"salary_accounts": operating_accounts["salary"],
-			"rent_accounts": operating_accounts["rent"],
-			"utility_accounts": operating_accounts["utility"],
-			"admin_accounts": operating_accounts["admin"],
-			"da_accounts": da_accounts,
-			"interest_accounts": interest_accounts,
-			"tax_accounts": tax_accounts,
-			"allocation_basis": "tax-excl revenue share",
-			"company_scope": company,
-		},
-	}
-
-
-def _cm2(
-	period: Period,
-	company: str,
-	rev_buckets_excl: dict[str, float],
-	margin: dict,
-) -> dict:
-	"""CM2 = CM1 − Freight − Packaging − Transaction Fees − Trade Schemes.
-
-	CM1 is Gross Profit (revenue − COGS). CM2 removes variable fulfillment costs that
-	vary with each sale: outbound logistics, secondary packaging, payment/marketplace
-	transaction fees, and any off-invoice trade schemes. Marketing is *not* deducted
-	here — that belongs to CM3.
-
-	All four deductions come from GL Entry against admin-configured accounts in
-	``Company Dashboard Settings``. GL carries no B2C/B2B dimension, so bucket figures
-	use tax-exclusive revenue-share allocation — aggregate is exact; per-bucket carries
-	that caveat.
-	"""
-	freight_accounts = get_configured_accounts("outbound_freight_accounts")
-	packaging_accounts = get_configured_accounts("packaging_overhead_accounts")
-	commission_accounts = get_configured_accounts("marketplace_commission_accounts")
-	scheme_accounts = get_configured_accounts("trade_scheme_accounts")
-
-	freight_total = _gl_spend(freight_accounts, period.from_date, period.to_date, company)
-	packaging_total = _gl_spend(packaging_accounts, period.from_date, period.to_date, company)
-	commission_total = _gl_spend(commission_accounts, period.from_date, period.to_date, company)
-	scheme_total = _gl_spend(scheme_accounts, period.from_date, period.to_date, company)
-	variable_total = freight_total + packaging_total + commission_total + scheme_total
-
-	rev_overall = rev_buckets_excl.get("total", 0.0)
-	rev_b2c = rev_buckets_excl.get("b2c", 0.0)
-	rev_b2b = rev_buckets_excl.get("b2b", 0.0)
-
-	def _share(part: float) -> float:
-		return (part / rev_overall) if rev_overall else 0.0
-
-	share_b2c = _share(rev_b2c)
-	share_b2b = _share(rev_b2b)
-
-	def _pack(gp: float, deduction: float, rev: float) -> dict:
-		cm2 = gp - deduction
-		pct = (cm2 / rev * 100) if rev else 0.0
-		return {"cm2": cm2, "cm2_pct": pct, "deduction": deduction}
-
-	return {
-		"overall": _pack(margin["gross_profit"], variable_total, rev_overall),
-		"b2c": _pack(margin["b2c"]["gross_profit"], variable_total * share_b2c, rev_b2c),
-		"b2b": _pack(margin["b2b"]["gross_profit"], variable_total * share_b2b, rev_b2b),
-		"inputs": {
-			"freight_total": freight_total,
-			"packaging_total": packaging_total,
-			"commission_total": commission_total,
-			"scheme_total": scheme_total,
-			"variable_total": variable_total,
-			"freight_accounts": freight_accounts,
-			"packaging_accounts": packaging_accounts,
-			"commission_accounts": commission_accounts,
-			"scheme_accounts": scheme_accounts,
-			"allocation_basis": "tax-excl revenue share",
-			"company_scope": company,
-		},
-	}
-
-
-def _cm3(
-	period: Period,
-	company: str,
-	rev_buckets_excl: dict[str, float],
-	cm2_overall: float,
-	cm2_b2c: float,
-	cm2_b2b: float,
-) -> dict:
-	"""CM3 = CM2 − Marketing.
-
-	Marketing spend (online + offline — performance ads, brand, promotions, trade
-	marketing) is subtracted from CM2 to expose whether customer acquisition is
-	profitable. Fixed operating costs (salary, rent, utilities, admin) belong to
-	EBITDA, not CM3 — they live under their own section in settings for a future tile.
-	"""
-	marketing_accounts = get_configured_accounts("marketing_accounts")
-	marketing_total = _gl_spend(marketing_accounts, period.from_date, period.to_date, company)
-
-	rev_overall = rev_buckets_excl.get("total", 0.0)
-	rev_b2c = rev_buckets_excl.get("b2c", 0.0)
-	rev_b2b = rev_buckets_excl.get("b2b", 0.0)
-
-	def _share(part: float) -> float:
-		return (part / rev_overall) if rev_overall else 0.0
-
-	def _pack(cm2: float, deduction: float, rev: float) -> dict:
-		cm3 = cm2 - deduction
-		pct = (cm3 / rev * 100) if rev else 0.0
-		return {"cm3": cm3, "cm3_pct": pct, "deduction": deduction}
-
-	return {
-		"overall": _pack(cm2_overall, marketing_total, rev_overall),
-		"b2c": _pack(cm2_b2c, marketing_total * _share(rev_b2c), rev_b2c),
-		"b2b": _pack(cm2_b2b, marketing_total * _share(rev_b2b), rev_b2b),
-		"inputs": {
-			"marketing_total": marketing_total,
-			"marketing_accounts": marketing_accounts,
-			"allocation_basis": "tax-excl revenue share",
-			"company_scope": company,
-		},
-	}
-
-
-def _excluded_customer_stats(period: Period, amt_expr: str) -> dict:
-	"""How much revenue was dropped because of the internal-customer filter."""
+def _unconfigured_income_warnings(company: str, period: Period) -> list[dict]:
+	"""External Sales Invoice lines booked to income accounts that are not configured as
+	Sales accounts — left out of revenue (they show in Other income). Nothing to warn
+	about when no Sales accounts are configured (every income account counts)."""
+	sales = _sales_accounts()
+	if not sales:
+		return []
 	rows = frappe.db.sql(
 		f"""
-		select
-			count(distinct si.name)                           as invoices,
-			coalesce(sum({amt_expr}), 0)                      as amt
-		from `tabSales Invoice Item` sii
-		join `tabSales Invoice`   si on si.name = sii.parent
-		left join `tabCustomer`   c  on c.name  = si.customer
-		where si.docstatus = 1
-		  and si.is_return = 0
-		  and si.posting_date between %(from)s and %(to)s
-		  and (coalesce(c.is_internal_customer, 0) = 1
-		       or coalesce(c.is_bns_internal_customer, 0) = 1)
+		select sii.income_account, coalesce(sum({AMT_EXCL}), 0) as amt
+		from {SII_BASE_FROM}
+		where si.docstatus = 1 and coalesce(si.is_opening, 'No') != 'Yes'
+		  and si.company = %(company)s and si.posting_date between %(from)s and %(to)s
+		  and {_internal_customer_sql()}
+		  and sii.income_account not in %(sales)s
+		group by sii.income_account
+		having abs(coalesce(sum({AMT_EXCL}), 0)) >= 1
+		order by abs(coalesce(sum({AMT_EXCL}), 0)) desc
 		""",
-		{"from": period.from_date, "to": period.to_date},
+		{"company": company, "from": period.from_date, "to": period.to_date, "sales": tuple(sales)},
+		as_dict=True,
+	)
+	return [
+		{
+			"code": "unconfigured_income_account",
+			"account": r.income_account,
+			"message": _(
+				"Sales Invoice lines worth {0} are booked to {1}, which is not a configured Sales account, so they count as Other income, not revenue."
+			).format(frappe.format_value(flt(r.amt), {"fieldtype": "Currency"}), r.income_account),
+		}
+		for r in rows
+	]
+
+
+def _excluded_customer_stats(company: str, period: Period, mode: str) -> dict:
+	"""How much revenue the internal-customer filter dropped."""
+	params: dict = {}
+	amt = AMT_INCL if mode == "incl" else AMT_EXCL
+	rows = frappe.db.sql(
+		f"""
+		select count(distinct si.name) as invoices, coalesce(sum({amt}), 0) as amt
+		from {SII_BASE_FROM}
+		where {_base_where(params, company, period.from_date, period.to_date, internal=True)}
+		""",
+		params,
 		as_dict=True,
 	)
 	if not rows:
@@ -655,496 +682,943 @@ def _excluded_customer_stats(period: Period, amt_expr: str) -> dict:
 	return {"invoices": int(rows[0]["invoices"]), "amount": flt(rows[0]["amt"])}
 
 
-def _default_company() -> str:
-	"""Prefer the ERPNext global default; fallback to first non-disabled Company."""
-	company = frappe.defaults.get_global_default("company")
-	if company:
-		return company
-	rows = frappe.get_all(
-		"Company", fields=["name"], filters={"disabled": 0}, order_by="creation asc", limit=1
+# ── GL P&L ──────────────────────────────────────────────────────────────────
+
+# (key, settings field, label) in ladder order.
+PL_LINES: tuple[tuple[str, str, str], ...] = (
+	("direct", "direct_cost_accounts", "Direct costs"),
+	("freight", "outbound_freight_accounts", "Outbound freight"),
+	("packaging", "packaging_overhead_accounts", "Packaging & dispatch"),
+	("commission", "marketplace_commission_accounts", "Transaction fees & commissions"),
+	("scheme", "trade_scheme_accounts", "Trade schemes & rebates"),
+	("marketing", "marketing_accounts", "Marketing"),
+	("salary", "salary_accounts", "Salary & payroll"),
+	("rent", "rent_accounts", "Rent & lease"),
+	("utility", "utility_accounts", "Utilities & communications"),
+	("admin", "admin_overhead_accounts", "Admin & general overhead"),
+	("da", "depreciation_amortization_accounts", "Depreciation & amortization"),
+	("interest", "interest_and_finance_accounts", "Interest & finance cost"),
+	("tax", "tax_expense_accounts", "Income tax"),
+)
+PL_KEYS = tuple(k for k, _f, _l in PL_LINES)
+VARIABLE_KEYS = ("freight", "packaging", "commission", "scheme")
+OPERATING_KEYS = ("salary", "rent", "utility", "admin")
+
+
+def _finance_book_clause(company: str, params: dict) -> str:
+	"""Entries with no finance book plus the company's default book — what ERPNext's own
+	financial statements show when no book is picked."""
+	fb = frappe.get_cached_value("Company", company, "default_finance_book")
+	if fb:
+		params["finance_book"] = fb
+		return "and (coalesce(ge.finance_book, '') = '' or ge.finance_book = %(finance_book)s)"
+	return "and coalesce(ge.finance_book, '') = ''"
+
+
+def _gl_pl_balances(company: str, from_date: date, to_date: date) -> dict[str, frappe._dict]:
+	"""Net (debit − credit) per P&L account for the window. Excludes cancelled entries,
+	opening entries and Period Closing Vouchers (which would zero every account).
+	Memoised per request — an export builds three pages from the same window."""
+	memo = getattr(frappe.local, "company_dashboard_gl", None)
+	if memo is None:
+		memo = frappe.local.company_dashboard_gl = {}
+	key = (company, from_date, to_date)
+	if key in memo:
+		return memo[key]
+	params: dict = {"company": company, "from": from_date, "to": to_date}
+	fb = _finance_book_clause(company, params)
+	rows = frappe.db.sql(
+		f"""
+		select ge.account, acc.root_type, acc.account_type, acc.account_name,
+		       sum(ge.debit) - sum(ge.credit) as net
+		from `tabGL Entry` ge
+		join `tabAccount` acc on acc.name = ge.account
+		where ge.company = %(company)s
+		  and ge.posting_date between %(from)s and %(to)s
+		  and ge.is_cancelled = 0
+		  and coalesce(ge.is_opening, 'No') = 'No'
+		  and ge.voucher_type != 'Period Closing Voucher'
+		  and acc.root_type in ('Income', 'Expense')
+		  {fb}
+		group by ge.account, acc.root_type, acc.account_type, acc.account_name
+		""",
+		params,
+		as_dict=True,
 	)
-	return rows[0]["name"] if rows else "Company"
+	for r in rows:
+		r.net = flt(r.net)
+	memo[key] = {r.account: r for r in rows}
+	return memo[key]
 
 
-@frappe.whitelist()
-def get_sku_assortment(
-	tax_mode: str = "incl",
+def _internal_pl_accounts() -> set[str]:
+	"""Internal-transfer accounts: BNS branch-accounting ones plus the admin's
+	``wc_internal_accounts``. Only their P&L rows are used here."""
+	from company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings import (
+		_bns_internal_accounts,
+	)
+
+	return set(_bns_internal_accounts()) | set(get_configured_accounts("wc_internal_accounts"))
+
+
+def _seed_hint_matches(fieldname: str, account_name: str) -> bool:
+	for field, include, exclude in _SEED_MAP:
+		if field != fieldname:
+			continue
+		raw = (account_name or "").lower()
+		return not any(x in raw for x in exclude) and any(h in raw for h in include)
+	return False
+
+
+def _pl_breakdown(company: str, period: Period, revenue_excl: float) -> dict:
+	"""Every P&L figure below revenue, from the GL. Mapping problems are reported as
+	warnings and the account falls through to Other expenses / Other income, so the
+	ladder still ties to GL net profit."""
+	balances = _gl_pl_balances(company, period.from_date, period.to_date)
+	labels = {k: lbl for k, _f, lbl in PL_LINES}
+	configured = {k: get_configured_accounts(f) for k, f, _l in PL_LINES}
+	meta = get_account_meta({a for accs in configured.values() for a in accs} | set(_sales_accounts()))
+
+	warnings: list[dict] = []
+	assigned: dict[str, str] = {}
+	for key, field, label in PL_LINES:
+		roots = ("Expense", "Income") if field in PL_INCOME_ALLOWED_FIELDS else ("Expense",)
+		for acc in configured[key]:
+			m = meta.get(acc)
+			if m and m.company and m.company != company:
+				continue  # the settings singleton is shared by all companies
+			reason = None
+			if not m:
+				reason = _("does not exist")
+			elif m.is_group:
+				reason = _("is a group account, which never has postings — map its leaf accounts")
+			elif m.root_type not in roots:
+				reason = _("has root type {0}, so it is not a P&L expense here — ignored").format(
+					m.root_type or "(none)"
+				)
+			elif m.account_type in COGS_ACCOUNT_TYPES:
+				reason = _("is already in cost of goods — ignored here")
+			elif acc in assigned:
+				reason = _("is also mapped in {0} — counted there only").format(labels[assigned[acc]])
+			if reason:
+				warnings.append(
+					{
+						"code": "bad_mapping",
+						"bucket": key,
+						"account": acc,
+						"message": f"{label}: {acc} {reason}.",
+					}
+				)
+				continue
+			assigned[acc] = key
+
+	totals = dict.fromkeys(PL_KEYS, 0.0)
+	accounts = {k: [] for k in PL_KEYS}
+	active = dict.fromkeys(PL_KEYS, False)
+	for acc, key in assigned.items():
+		accounts[key].append(acc)
+		row = balances.get(acc)
+		if row:
+			totals[key] += row.net
+			active[key] = True
+
+	cogs_rows = [
+		r for r in balances.values() if r.root_type == "Expense" and r.account_type in COGS_ACCOUNT_TYPES
+	]
+	# Internal-transfer P&L accounts (branch sales/purchase transfers) form their own line,
+	# so they don't inflate Other income / Other expenses. Internal COGS stays in cost of
+	# goods, as the audit's reconciliation counts it.
+	internal = _internal_pl_accounts()
+	internal_rows = [
+		r
+		for r in balances.values()
+		if r.account in internal and r.account not in assigned and r.account_type not in COGS_ACCOUNT_TYPES
+	]
+	internal_names = {r.account for r in internal_rows}
+	unmapped_rows = [
+		r
+		for r in balances.values()
+		if r.root_type == "Expense"
+		and r.account_type not in COGS_ACCOUNT_TYPES
+		and r.account not in assigned
+		and r.account not in internal_names
+	]
+	income_rows = [
+		r
+		for r in balances.values()
+		if r.root_type == "Income" and r.account not in assigned and r.account not in internal_names
+	]
+	sales = set(_sales_accounts())
+
+	cogs = sum(r.net for r in cogs_rows)
+	internal_net = sum(r.net for r in internal_rows)
+	unmapped_expense = sum(r.net for r in unmapped_rows)
+	income_unassigned = -sum(r.net for r in income_rows)
+	other_income = income_unassigned - revenue_excl
+	sales_gl = -sum(r.net for r in income_rows if r.account in sales) if sales else None
+	revenue_gl_difference = (sales_gl - revenue_excl) if sales_gl is not None else None
+	gl_net_profit = -sum(r.net for r in balances.values())
+
+	# P12: a bucket with no postings while similarly named unmapped accounts have some.
+	for key, field, label in PL_LINES:
+		if active[key]:
+			continue
+		lookalikes = [
+			r for r in unmapped_rows + income_rows if r.net and _seed_hint_matches(field, r.account_name)
+		]
+		if lookalikes:
+			names = ", ".join(r.account for r in sorted(lookalikes, key=lambda r: -abs(r.net))[:3])
+			warnings.append(
+				{
+					"code": "empty_bucket",
+					"bucket": key,
+					"message": _(
+						"{0} has no postings in this period, but unmapped accounts that look like it do: {1}."
+					).format(label, names),
+				}
+			)
+
+	def _top(rows: list, sign: int) -> list[dict]:
+		return [
+			{"account": r.account, "amount": sign * r.net}
+			for r in sorted((r for r in rows if abs(r.net) >= 0.5), key=lambda r: -abs(r.net))[:15]
+		]
+
+	return {
+		"totals": totals,
+		"accounts": accounts,
+		"cogs": cogs,
+		"cogs_accounts": [{"account": r.account, "amount": r.net} for r in cogs_rows],
+		"unmapped_expense": unmapped_expense,
+		"unmapped_expense_accounts": _top(unmapped_rows, 1),
+		"other_income": other_income,
+		"other_income_accounts": _top([r for r in income_rows if r.account not in sales], -1),
+		"internal_net": internal_net,
+		"internal_accounts": _top(internal_rows, 1),
+		"sales_gl": sales_gl,
+		"revenue_gl_difference": revenue_gl_difference,
+		"gl_net_profit": gl_net_profit,
+		"warnings": warnings,
+	}
+
+
+def _ladder(rev_excl: dict[str, float], line_cost: dict[str, float], pl: dict) -> dict[str, dict]:
+	"""CM1 → PAT for overall and each bucket.
+
+	Overall cost of goods is the GL figure. A bucket gets its own stock-ledger line cost
+	plus a revenue share of the unallocated remainder; every other GL line is shared by
+	tax-exclusive revenue. Buckets therefore sum exactly to overall, and overall PAT
+	equals GL net profit.
+	"""
+	total_rev = rev_excl["overall"]
+	line_total = sum(line_cost[b] for b in BUCKETS)
+	unallocated = pl["cogs"] - line_total
+	t = pl["totals"]
+	other_net = pl["unmapped_expense"] - pl["other_income"]
+	internal_net = pl.get("internal_net", 0.0)
+
+	def share(b: str) -> float:
+		if b == "overall":
+			return 1.0
+		if total_rev:
+			return rev_excl[b] / total_rev
+		return 1.0 if b == "unclassified" else 0.0
+
+	out: dict[str, dict] = {}
+	for b in ("overall", *BUCKETS):
+		s = share(b)
+		rev = rev_excl[b]
+		row = {"revenue": rev, "share": s}
+		row["cogs_allocated"] = line_total if b == "overall" else line_cost[b]
+		row["cogs_unallocated"] = unallocated * s
+		row["cogs"] = row["cogs_allocated"] + row["cogs_unallocated"]
+		for k in PL_KEYS:
+			row[k] = t[k] * s
+		row["other_expense"] = pl["unmapped_expense"] * s
+		row["other_income"] = pl["other_income"] * s
+		row["other_net"] = other_net * s
+		row["internal"] = internal_net * s
+		row["variable"] = sum(row[k] for k in VARIABLE_KEYS)
+		row["operating"] = sum(row[k] for k in OPERATING_KEYS)
+		row["cm1"] = rev - row["cogs"] - row["direct"]
+		row["cm2"] = row["cm1"] - row["variable"]
+		row["cm3"] = row["cm2"] - row["marketing"]
+		row["ebitda"] = row["cm3"] - row["operating"] - row["other_net"] - row["internal"]
+		row["ebit"] = row["ebitda"] - row["da"]
+		row["pbt"] = row["ebit"] - row["interest"]
+		row["pat"] = row["pbt"] - row["tax"]
+		for tier in ("cm1", "cm2", "cm3", "ebitda", "ebit", "pbt", "pat"):
+			row[f"{tier}_pct"] = _pct(row[tier], rev)
+		out[b] = row
+	return out
+
+
+def _pnl_steps(row: dict, pl: dict) -> list[dict]:
+	"""Waterfall steps for one bucket, ex-tax. Deductions are negative; ``subtotal`` is the
+	running total after the step, so the last step equals PAT."""
+	accounts = pl["accounts"]
+	steps: list[dict] = []
+	running = row["revenue"]
+	steps.append(
+		{
+			"key": "revenue",
+			"label": "Revenue",
+			"kind": "anchor",
+			"amount": running,
+			"subtotal": running,
+			"note": "ex-tax, net of returns",
+			"group": None,
+		}
+	)
+
+	def n_accounts(key: str) -> str:
+		n = len(accounts.get(key) or [])
+		return f"{n} account{'s' if n != 1 else ''}"
+
+	def deduct(key: str, label: str, amount: float, note: str, group: str | None = None) -> None:
+		nonlocal running
+		running -= amount
+		steps.append(
+			{
+				"key": key,
+				"label": label,
+				"kind": "deduction",
+				"amount": -amount,
+				"subtotal": running,
+				"note": note,
+				"group": group,
+			}
+		)
+
+	def tier(key: str, label: str) -> None:
+		steps.append(
+			{
+				"key": key,
+				"label": label,
+				"kind": "tier",
+				"amount": running,
+				"subtotal": running,
+				"note": None,
+				"group": None,
+			}
+		)
+
+	deduct("cogs", "Cost of goods", row["cogs"], "GL: Cost of Goods Sold + Stock Adjustment accounts")
+	deduct("direct", "Direct costs", row["direct"], n_accounts("direct"))
+	tier("cm1", "CM1 · Gross margin")
+	deduct("freight", "Outbound freight", row["freight"], n_accounts("freight"), "variable")
+	deduct("packaging", "Packaging & dispatch", row["packaging"], n_accounts("packaging"), "variable")
+	deduct(
+		"commission",
+		"Transaction fees & commissions",
+		row["commission"],
+		n_accounts("commission"),
+		"variable",
+	)
+	deduct("scheme", "Trade schemes & rebates", row["scheme"], n_accounts("scheme"), "variable")
+	tier("cm2", "CM2 · Before marketing")
+	deduct("marketing", "Marketing", row["marketing"], n_accounts("marketing"))
+	tier("cm3", "CM3 · After marketing")
+	deduct("salary", "Salary & payroll", row["salary"], n_accounts("salary"), "operating")
+	deduct("rent", "Rent & lease", row["rent"], n_accounts("rent"), "operating")
+	deduct("utility", "Utilities & communications", row["utility"], n_accounts("utility"), "operating")
+	deduct("admin", "Admin & general overhead", row["admin"], n_accounts("admin"), "operating")
+	deduct(
+		"other", "Other expenses less other income", row["other_net"], "unmapped P&L accounts", "operating"
+	)
+	deduct(
+		"internal",
+		"Internal transfers (net)",
+		row["internal"],
+		"branch / inter-company transfer accounts",
+		"operating",
+	)
+	tier("ebitda", "EBITDA")
+	deduct("da", "Depreciation & amortization", row["da"], n_accounts("da"))
+	tier("ebit", "EBIT")
+	deduct("interest", "Interest & finance cost", row["interest"], n_accounts("interest"))
+	tier("pbt", "PBT · Profit before tax")
+	deduct("tax", "Income tax", row["tax"], n_accounts("tax"))
+	tier("pat", "PAT · Profit after tax")
+	for s in steps:
+		s["pct"] = _pct(s["amount"], row["revenue"])
+	return steps
+
+
+# ── Overview ────────────────────────────────────────────────────────────────
+
+
+def _monthly_revenue(period: Period, lines: list[SalesLine], mode: str) -> list[dict]:
+	"""Per-month revenue in ₹L by bucket. Totals are rounded once, from raw sums."""
+	raw: dict[str, dict[str, float]] = defaultdict(lambda: dict.fromkeys(BUCKETS, 0.0))
+	for ln in lines:
+		raw[ln.month][ln.bucket] += ln.rev(mode)
+	out = []
+	cursor = period.from_date.replace(day=1)
+	last_partial = period.to_date.day != calendar.monthrange(period.to_date.year, period.to_date.month)[1]
+	while cursor <= period.to_date:
+		key = f"{cursor.year}-{cursor.month:02d}"
+		vals = raw.get(key, dict.fromkeys(BUCKETS, 0.0))
+		is_last = cursor.year == period.to_date.year and cursor.month == period.to_date.month
+		out.append(
+			{
+				"key": key,
+				"month": MONTH_ABBR[cursor.month - 1],
+				"year": cursor.year,
+				"b2c": round(vals["b2c"] / 1_00_000, 2),
+				"b2b": round(vals["b2b"] / 1_00_000, 2),
+				"other": round(vals["unclassified"] / 1_00_000, 2),
+				"total": round(sum(vals.values()) / 1_00_000, 2),
+				"partial": bool(is_last and last_partial) or (cursor < period.from_date),
+			}
+		)
+		cursor = getdate(add_months(cursor, 1))
+	return out
+
+
+def _categories(lines: list[SalesLine], mode: str) -> list[dict]:
+	"""Top-N item groups by revenue; the rest collapses into 'Other'."""
+	agg: dict[str, dict] = {}
+	for ln in lines:
+		e = agg.setdefault(ln.item_group, {"revenue": 0.0, "skus": set()})
+		e["revenue"] += ln.rev(mode)
+		e["skus"].add(ln.item_code)
+	rows = sorted(agg.items(), key=lambda kv: kv[1]["revenue"], reverse=True)
+	out = [
+		{"category": k, "sku_count": len(v["skus"]), "revenue": round(v["revenue"] / 1_00_000, 2)}
+		for k, v in rows[:TOP_N_CATEGORIES]
+	]
+	rest = rows[TOP_N_CATEGORIES:]
+	if rest:
+		out.append(
+			{
+				"category": "Other",
+				"sku_count": len(set().union(*(v["skus"] for _k, v in rest))),
+				"revenue": round(sum(v["revenue"] for _k, v in rest) / 1_00_000, 2),
+			}
+		)
+	return out
+
+
+def _avg_mrp(item_codes: set[str], as_of: date) -> float | None:
+	"""Average MRP over items sold in the period, from the MRP price list (latest valid
+	price per item). None when no MRP price list exists."""
+	price_list = get_mrp_price_list()
+	if not price_list or not item_codes:
+		return None
+	rows = frappe.db.sql(
+		"""
+		select item_code, price_list_rate
+		from `tabItem Price`
+		where price_list = %(pl)s and item_code in %(items)s and price_list_rate > 0
+		  and (valid_from is null or valid_from <= %(d)s)
+		  and (valid_upto is null or valid_upto >= %(d)s)
+		order by item_code, valid_from desc
+		""",
+		{"pl": price_list, "items": tuple(item_codes), "d": as_of},
+	)
+	latest: dict[str, float] = {}
+	for code, rate in rows:
+		latest.setdefault(code, flt(rate))
+	return (sum(latest.values()) / len(latest)) if latest else None
+
+
+def _compute_overview(
+	tax_mode: str = "excl",
 	from_date: str | None = None,
 	to_date: str | None = None,
-	intent: str = "all",
-) -> dict:
-	"""Per-SKU revenue + monthly trend + per-SKU CM ladder allocation (24-hour cache)."""
-	_require_mis_access()
-	from company_dashboard.api.report_cache import get_or_compute as _cached
-	params = {"tax_mode": tax_mode, "from_date": from_date, "to_date": to_date, "intent": intent, **_ttm_cache_anchor(from_date, to_date)}
-	return _cached("mis", "sku_assortment", lambda: _compute_sku_assortment(tax_mode, from_date, to_date, intent), params)
-
-
-def _compute_sku_assortment(
-	tax_mode: str = "incl",
-	from_date: str | None = None,
-	to_date: str | None = None,
-	intent: str = "all",
+	company: str | None = None,
 ) -> dict:
 	if not _erpnext_installed():
 		frappe.throw(_("ERPNext is not installed on this site."))
 
-	mode = tax_mode if tax_mode in TAX_MODES else "incl"
-	amt_expr = TAX_MODES[mode]
-	company = _default_company()
-	period = _custom_window(getdate(from_date), getdate(to_date)) if (from_date and to_date) else _ttm_window()
+	mode = tax_mode if tax_mode in TAX_MODES else "excl"
+	company = _resolve_company(company)
+	period = _period_for(from_date, to_date)
+	lines = _sales_lines(company, period.from_date, period.to_date)
 
-	intent_clause = ""
-	if intent == "b2c":
-		intent_clause = "and i.custom_sales_intent like 'B2C%%'"
-	elif intent == "b2b":
-		intent_clause = "and i.custom_sales_intent like 'B2B%%'"
+	rev_disp = dict.fromkeys(BUCKETS, 0.0)
+	rev_excl = dict.fromkeys(BUCKETS, 0.0)
+	line_cost = dict.fromkeys(BUCKETS, 0.0)
+	by_bucket: dict[str, list[SalesLine]] = {b: [] for b in BUCKETS}
+	for ln in lines:
+		rev_disp[ln.bucket] += ln.rev(mode)
+		rev_excl[ln.bucket] += ln.rev_excl
+		line_cost[ln.bucket] += ln.allocated_cost
+		by_bucket[ln.bucket].append(ln)
+	rev_excl["overall"] = sum(rev_excl[b] for b in BUCKETS)
+	rev_disp_total = sum(rev_disp.values())
 
-	# Per-SKU per-month aggregation. Single query, ~5K rows even on a 1000-SKU corpus
-	# (1000 SKUs × ~5 active months on average).
-	rows = frappe.db.sql(
-		f"""
-		select
-			sii.item_code                                                                 as item_code,
-			max(coalesce(i.item_name, sii.item_code))                                     as item_name,
-			max(coalesce(i.item_group, 'Unclassified'))                                   as item_group,
-			max(i.custom_sales_intent)                                                    as intent,
-			year(si.posting_date)                                                         as yr,
-			month(si.posting_date)                                                        as mo,
-			coalesce(sum({amt_expr}), 0)                                                  as revenue,
-			coalesce(sum(
-				coalesce(nullif(sii.incoming_rate, 0), dni.incoming_rate, 0) * sii.stock_qty
-			), 0)                                                                          as cogs,
-			coalesce(sum(sii.stock_qty), 0)                                               as qty,
-			count(distinct si.name)                                                        as invoices
-		from {SII_BASE_FROM}
-		left join `tabDelivery Note Item` dni on dni.name = sii.dn_detail
-		where {SII_BASE_WHERE}
-		  {intent_clause}
-		group by sii.item_code, yr, mo
-		""",
-		{"from": period.from_date, "to": period.to_date},
-		as_dict=True,
-	)
+	pl = _pl_breakdown(company, period, rev_excl["overall"])
+	ladder = _ladder(rev_excl, line_cost, pl)
+	prior = _revenue_by_bucket(company, period.prior_from, period.prior_to, mode)
+	period_info = _period_dict(period, company)
+	quality = _quality(lines)
+	quality["warnings"] = pl["warnings"] + _unconfigured_income_warnings(company, period)
+	quality["unallocated_cogs"] = ladder["overall"]["cogs_unallocated"]
+	quality["pat_residual"] = ladder["overall"]["pat"] - pl["gl_net_profit"]
 
-	# Pivot into per-SKU rows + collect month list.
-	skus: dict[str, dict] = {}
-	cursor = period.from_date.replace(day=1)
+	kpi: dict = {
+		"total_revenue": rev_disp_total,
+		"total_revenue_excl": rev_excl["overall"],
+		"total_revenue_prior": prior["total"],
+		"prior_available": period_info["prior"]["available"],
+		"cogs": ladder["overall"]["cogs"],
+		"cogs_allocated": ladder["overall"]["cogs_allocated"],
+		"cogs_unallocated": ladder["overall"]["cogs_unallocated"],
+		"direct_costs": ladder["overall"]["direct"],
+		"other_expenses": ladder["overall"]["other_expense"],
+		"other_income": ladder["overall"]["other_income"],
+		"internal_transfers": ladder["overall"]["internal"],
+		"gl_net_profit": pl["gl_net_profit"],
+		"pat_residual": quality["pat_residual"],
+		"cm2_deduction": ladder["overall"]["variable"],
+		"cm3_deduction": ladder["overall"]["marketing"],
+	}
+	for b, prefix in (("overall", ""), ("b2c", "b2c_"), ("b2b", "b2b_"), ("unclassified", "unclassified_")):
+		row = ladder[b]
+		if b != "overall":
+			kpi[f"{b}_revenue"] = rev_disp[b]
+			kpi[f"{b}_revenue_excl"] = rev_excl[b]
+			kpi[f"{b}_revenue_prior"] = prior[b]
+			kpi[f"{b}_gross_margin_coverage_pct"] = _coverage(by_bucket[b])
+		else:
+			kpi["gross_margin_coverage_pct"] = quality["coverage_pct"]
+		kpi[f"{prefix}gross_profit"] = row["cm1"]
+		kpi[f"{prefix}gross_margin_pct"] = row["cm1_pct"]
+		for tier in ("cm1", "cm2", "cm3", "ebitda", "ebit", "pbt", "pat"):
+			kpi[f"{prefix}{tier}"] = row[tier]
+			kpi[f"{prefix}{tier}_pct"] = row[f"{tier}_pct"]
+
+	sold_items = {ln.item_code for ln in lines}
+	kpi["active_skus"] = len({ln.item_code for ln in lines if ln.is_stock_item and ln.rev_excl > 0})
+	kpi["avg_mrp"] = _avg_mrp(sold_items, period.to_date)
+
+	o = ladder["overall"]
+	acc = pl["accounts"]
+	return {
+		"period": period_info,
+		"company": company,
+		"tax_mode": mode,
+		"basis": {"revenue": mode, "margins": "excl"},
+		"kpi": kpi,
+		"pnl": {b: _pnl_steps(ladder[b], pl) for b in ("overall", *BUCKETS)},
+		"cm2_inputs": {
+			"freight_total": o["freight"],
+			"packaging_total": o["packaging"],
+			"commission_total": o["commission"],
+			"scheme_total": o["scheme"],
+			"variable_total": o["variable"],
+			"freight_accounts": acc["freight"],
+			"packaging_accounts": acc["packaging"],
+			"commission_accounts": acc["commission"],
+			"scheme_accounts": acc["scheme"],
+			"allocation_basis": "tax-excl revenue share",
+			"company_scope": company,
+		},
+		"cm3_inputs": {
+			"marketing_total": o["marketing"],
+			"marketing_accounts": acc["marketing"],
+			"allocation_basis": "tax-excl revenue share",
+			"company_scope": company,
+		},
+		"ladder_inputs": {
+			"cogs_total": o["cogs"],
+			"cogs_allocated": o["cogs_allocated"],
+			"cogs_unallocated": o["cogs_unallocated"],
+			"cogs_accounts": pl["cogs_accounts"],
+			"direct_total": o["direct"],
+			"direct_accounts": acc["direct"],
+			"salary_total": o["salary"],
+			"rent_total": o["rent"],
+			"utility_total": o["utility"],
+			"admin_total": o["admin"],
+			"operating_total": o["operating"],
+			"other_expense_total": o["other_expense"],
+			"other_income_total": o["other_income"],
+			"other_net_total": o["other_net"],
+			"internal_total": o["internal"],
+			"internal_accounts": pl["internal_accounts"],
+			"unmapped_expense_accounts": pl["unmapped_expense_accounts"],
+			"other_income_accounts": pl["other_income_accounts"],
+			"revenue_gl_difference": pl["revenue_gl_difference"],
+			"sales_gl": pl["sales_gl"],
+			"da_total": o["da"],
+			"interest_total": o["interest"],
+			"tax_total": o["tax"],
+			"salary_accounts": acc["salary"],
+			"rent_accounts": acc["rent"],
+			"utility_accounts": acc["utility"],
+			"admin_accounts": acc["admin"],
+			"da_accounts": acc["da"],
+			"interest_accounts": acc["interest"],
+			"tax_accounts": acc["tax"],
+			"gl_net_profit": pl["gl_net_profit"],
+			"allocation_basis": "tax-excl revenue share",
+			"company_scope": company,
+		},
+		"monthly": _monthly_revenue(period, lines, mode),
+		"categories": _categories(lines, mode),
+		"data_quality": quality,
+		"settings": {
+			"outbound_freight_accounts": acc["freight"],
+			"packaging_overhead_accounts": acc["packaging"],
+		},
+		"debug": {
+			"classification": "Item.custom_sales_intent (B2C*/B2B*)",
+			"intent_field_present": _intent_col() != "null",
+			"tax_mode": mode,
+			"excluded_internal": _excluded_customer_stats(company, period, mode),
+			"generated_at": datetime.now(timezone.utc).isoformat(),
+		},
+	}
+
+
+# ── SKU assortment ──────────────────────────────────────────────────────────
+
+
+def _intent_filter(lines: list[SalesLine], intent: str) -> list[SalesLine]:
+	if intent in ("b2c", "b2b"):
+		return [ln for ln in lines if ln.bucket == intent]
+	return lines
+
+
+def _compute_sku_assortment(
+	tax_mode: str = "excl",
+	from_date: str | None = None,
+	to_date: str | None = None,
+	intent: str = "all",
+	company: str | None = None,
+) -> dict:
+	if not _erpnext_installed():
+		frappe.throw(_("ERPNext is not installed on this site."))
+
+	mode = tax_mode if tax_mode in TAX_MODES else "excl"
+	intent = intent if intent in ("all", "b2c", "b2b") else "all"
+	company = _resolve_company(company)
+	period = _period_for(from_date, to_date)
+	all_lines = _sales_lines(company, period.from_date, period.to_date)
+	lines = _intent_filter(all_lines, intent)
+
 	month_keys: list[str] = []
+	cursor = period.from_date.replace(day=1)
 	while cursor <= period.to_date:
 		month_keys.append(f"{cursor.year}-{cursor.month:02d}")
 		cursor = getdate(add_months(cursor, 1))
 
-	for row in rows:
-		code = row["item_code"]
-		bucket = skus.setdefault(
-			code,
-			{
-				"item_code": code,
-				"item_name": row["item_name"],
-				"item_group": row["item_group"],
-				"intent": row["intent"] or "—",
+	skus: dict[str, dict] = {}
+	for ln in lines:
+		s = skus.get(ln.item_code)
+		if s is None:
+			s = skus[ln.item_code] = {
+				"item_code": ln.item_code,
+				"item_name": ln.item_name,
+				"item_group": ln.item_group,
+				"intent": ln.intent or "—",
+				"is_stock_item": ln.is_stock_item,
+				"stock_uom": ln.stock_uom,
 				"revenue": 0.0,
+				"revenue_excl": 0.0,
+				"sold_revenue_excl": 0.0,
+				"valued_revenue_excl": 0.0,
 				"cogs": 0.0,
+				"flagged_lines": 0,
+				"flagged_cost": 0.0,
 				"qty": 0.0,
-				"invoices": 0,
-				"monthly": {k: 0.0 for k in month_keys},
-			},
-		)
-		bucket["revenue"] += flt(row["revenue"])
-		bucket["cogs"] += flt(row["cogs"])
-		bucket["qty"] += flt(row["qty"])
-		bucket["invoices"] += int(row["invoices"])
-		mkey = f"{int(row['yr'])}-{int(row['mo']):02d}"
-		if mkey in bucket["monthly"]:
-			bucket["monthly"][mkey] += flt(row["revenue"])
+				"_invoices": set(),
+				"monthly": dict.fromkeys(month_keys, 0.0),
+			}
+		s["revenue"] += ln.rev(mode)
+		s["revenue_excl"] += ln.rev_excl
+		s["cogs"] += ln.allocated_cost
+		if ln.rev_excl > 0:
+			s["sold_revenue_excl"] += ln.rev_excl
+			if ln.valued:
+				s["valued_revenue_excl"] += ln.rev_excl
+		if ln.flagged:
+			s["flagged_lines"] += 1
+			s["flagged_cost"] += ln.cost or 0.0
+		s["qty"] += ln.stock_qty
+		s["_invoices"].add(ln.invoice)
+		if ln.month in s["monthly"]:
+			s["monthly"][ln.month] += ln.rev(mode)
 
-	# Company-period totals for the allocation denominator. Always tax-exclusive since
-	# the underlying GL costs are net of GST — same rule the CM tier maths follow.
-	company_rev_excl = _revenue_by_bucket(period.from_date, period.to_date, AMT_EXCL)["total"]
-	freight = _gl_spend(get_configured_accounts("outbound_freight_accounts"), period.from_date, period.to_date, company)
-	packaging = _gl_spend(get_configured_accounts("packaging_overhead_accounts"), period.from_date, period.to_date, company)
-	commission = _gl_spend(get_configured_accounts("marketplace_commission_accounts"), period.from_date, period.to_date, company)
-	scheme = _gl_spend(get_configured_accounts("trade_scheme_accounts"), period.from_date, period.to_date, company)
-	marketing = _gl_spend(get_configured_accounts("marketing_accounts"), period.from_date, period.to_date, company)
+	# Allocation rates: GL cost ÷ company tax-exclusive revenue (all intents), applied to
+	# each SKU's tax-exclusive revenue — never to tax-inclusive revenue.
+	company_rev_excl = sum(ln.rev_excl for ln in all_lines)
+	pl = _pl_breakdown(company, period, company_rev_excl)
+	t = pl["totals"]
 
-	freight_pct = (freight / company_rev_excl) if company_rev_excl else 0.0
-	packaging_pct = (packaging / company_rev_excl) if company_rev_excl else 0.0
-	commission_pct = (commission / company_rev_excl) if company_rev_excl else 0.0
-	scheme_pct = (scheme / company_rev_excl) if company_rev_excl else 0.0
-	marketing_pct = (marketing / company_rev_excl) if company_rev_excl else 0.0
-	variable_pct = freight_pct + packaging_pct + commission_pct + scheme_pct
+	def rate(x: float) -> float:
+		return (x / company_rev_excl) if company_rev_excl else 0.0
 
-	# Finalise per-SKU rows with allocations and tier values.
+	rates = {k: rate(t[k]) for k in (*VARIABLE_KEYS, "marketing", "direct")}
+	variable_rate = sum(rates[k] for k in VARIABLE_KEYS)
+
 	out_rows: list[dict] = []
-	for sku in skus.values():
-		rev = sku["revenue"]
-		# Use tax-excl revenue ratio for cost allocation: when tax_mode=incl, rev contains
-		# GST so we'd over-allocate. Approximate by using the SKU's own tax-mode revenue
-		# divided by the company tax-mode revenue would also work; using the simpler
-		# absolute ratio against tax-excl total keeps allocations consistent with
-		# Overview's CM ladder.
-		alloc_freight = rev * freight_pct
-		alloc_packaging = rev * packaging_pct
-		alloc_commission = rev * commission_pct
-		alloc_scheme = rev * scheme_pct
-		alloc_marketing = rev * marketing_pct
-		alloc_variable = rev * variable_pct
-
-		gp = rev - sku["cogs"]
-		cm2 = gp - alloc_variable
-		cm3 = cm2 - alloc_marketing
-
-		def _pct(x: float) -> float:
-			return (x / rev * 100) if rev else 0.0
-
+	for s in skus.values():
+		rev = s["revenue_excl"]
+		s["invoices"] = len(s.pop("_invoices"))
+		alloc = {k: rev * rates[k] for k in (*VARIABLE_KEYS, "marketing")}
+		gp = rev - s["cogs"]
+		cm2 = gp - rev * variable_rate
+		cm3 = cm2 - alloc["marketing"]
 		out_rows.append(
 			{
-				**sku,
+				**s,
 				"gp": gp,
-				"gm_pct": _pct(gp),
-				"alloc_freight": alloc_freight,
-				"alloc_packaging": alloc_packaging,
-				"alloc_commission": alloc_commission,
-				"alloc_scheme": alloc_scheme,
-				"alloc_marketing": alloc_marketing,
-				"alloc_variable": alloc_variable,
+				"gm_pct": _pct(gp, rev),
+				"cost_coverage_pct": _pct(s["valued_revenue_excl"], s["sold_revenue_excl"]),
+				"alloc_freight": alloc["freight"],
+				"alloc_packaging": alloc["packaging"],
+				"alloc_commission": alloc["commission"],
+				"alloc_scheme": alloc["scheme"],
+				"alloc_marketing": alloc["marketing"],
+				"alloc_variable": rev * variable_rate,
 				"cm2": cm2,
-				"cm2_pct": _pct(cm2),
+				"cm2_pct": _pct(cm2, rev),
 				"cm3": cm3,
-				"cm3_pct": _pct(cm3),
+				"cm3_pct": _pct(cm3, rev),
 			}
 		)
-
 	out_rows.sort(key=lambda r: r["revenue"], reverse=True)
 
+	# The GL cost of goods not tied to any line (stock adjustments, JV/PI/PR/SE cost,
+	# flagged lines) plus direct costs. With an intent filter, its revenue share.
+	scope_rev = sum(r["revenue_excl"] for r in out_rows)
+	scope_share = (scope_rev / company_rev_excl) if company_rev_excl else (1.0 if intent == "all" else 0.0)
+	unallocated = (pl["cogs"] - sum(ln.allocated_cost for ln in all_lines)) * scope_share
+	direct = t["direct"] * scope_share
+	cogs_rows = sum(r["cogs"] for r in out_rows)
+	gp_total = scope_rev - cogs_rows - unallocated - direct
+
+	qty_by_uom: dict[str, float] = defaultdict(float)
+	for r in out_rows:
+		qty_by_uom[r["stock_uom"] or "—"] += r["qty"]
+
+	quality = _quality(lines)
+	quality["warnings"] = pl["warnings"]
 	return {
-		"period": period.as_dict(),
+		"period": _period_dict(period, company),
 		"company": company,
 		"tax_mode": mode,
+		"basis": {"revenue": mode, "margins": "excl"},
 		"intent": intent,
 		"month_keys": month_keys,
 		"rows": out_rows,
 		"totals": {
 			"sku_count": len(out_rows),
 			"revenue": sum(r["revenue"] for r in out_rows),
-			"cogs": sum(r["cogs"] for r in out_rows),
-			"qty": sum(r["qty"] for r in out_rows),
+			"revenue_excl": scope_rev,
+			"cogs": cogs_rows,
+			"cogs_unallocated": unallocated,
+			"direct_costs": direct,
+			"gp": gp_total,
+			"gm_pct": _pct(gp_total, scope_rev),
+			"qty_by_uom": dict(qty_by_uom),
+			"flagged_lines": quality["flagged_lines"],
+			"flagged_cost": quality["flagged_cost"],
 		},
 		"allocation": {
-			"basis": "company-period revenue share (tax-excl)",
-			"freight_pct": freight_pct * 100,
-			"packaging_pct": packaging_pct * 100,
-			"commission_pct": commission_pct * 100,
-			"scheme_pct": scheme_pct * 100,
-			"marketing_pct": marketing_pct * 100,
-			"variable_pct": variable_pct * 100,
+			"basis": "GL cost ÷ company tax-exclusive revenue, applied to each SKU's tax-exclusive revenue",
+			"freight_pct": rates["freight"] * 100,
+			"packaging_pct": rates["packaging"] * 100,
+			"commission_pct": rates["commission"] * 100,
+			"scheme_pct": rates["scheme"] * 100,
+			"marketing_pct": rates["marketing"] * 100,
+			"variable_pct": variable_rate * 100,
 		},
+		"data_quality": quality,
 	}
 
 
-@frappe.whitelist()
-def get_customer_segments(
-	tax_mode: str = "incl",
-	from_date: str | None = None,
-	to_date: str | None = None,
-	intent: str = "all",
-	top_n_customers: int = 10,
-	top_n_categories: int = 10,
-) -> dict:
-	"""Per-Customer-Group analysis (24-hour cache)."""
-	_require_mis_access()
-	from company_dashboard.api.report_cache import get_or_compute as _cached
-	# top_n_* MUST be in the cache key — they change the sliced row counts, so omitting
-	# them would serve a cached 10-row payload to a caller asking for 25 (or vice-versa).
-	params = {
-		"tax_mode": tax_mode,
-		"from_date": from_date,
-		"to_date": to_date,
-		"intent": intent,
-		"top_n_customers": top_n_customers,
-		"top_n_categories": top_n_categories,
-		**_ttm_cache_anchor(from_date, to_date),
-	}
-	return _cached(
-		"mis", "customer_segments",
-		lambda: _compute_customer_segments(tax_mode, from_date, to_date, intent, top_n_customers, top_n_categories),
+# ── Customer segments ──────────────────────────────────────────────────────
+
+
+def _segment_prior(
+	company: str, period: Period, mode: str, intent: str, remap, allowed: set[str] | None
+) -> dict[str, float]:
+	"""Prior-window revenue per (rolled-up) segment, same filters as the current window."""
+	params: dict = {}
+	amt = AMT_INCL if mode == "incl" else AMT_EXCL
+	rows = frappe.db.sql(
+		f"""
+		select {_segment_sql()} as segment, {_intent_bucket_sql()}, coalesce(sum({amt}), 0) as revenue
+		from {SII_BASE_FROM}
+		where {_base_where(params, company, period.prior_from, period.prior_to)}
+		group by segment, bucket
+		""",
 		params,
+		as_dict=True,
 	)
+	out: dict[str, float] = defaultdict(float)
+	for r in rows:
+		if intent in ("b2c", "b2b") and r["bucket"] != intent:
+			continue
+		if allowed is not None and r["segment"] not in allowed:
+			continue
+		out[remap(r["segment"])] += flt(r["revenue"])
+	return out
 
 
 def _compute_customer_segments(
-	tax_mode: str = "incl",
+	tax_mode: str = "excl",
 	from_date: str | None = None,
 	to_date: str | None = None,
 	intent: str = "all",
 	top_n_customers: int = 10,
 	top_n_categories: int = 10,
+	company: str | None = None,
 ) -> dict:
 	if not _erpnext_installed():
 		frappe.throw(_("ERPNext is not installed on this site."))
 
-	mode = tax_mode if tax_mode in TAX_MODES else "incl"
-	amt_expr = TAX_MODES[mode]
-	period = (
-		_custom_window(getdate(from_date), getdate(to_date))
-		if (from_date and to_date)
-		else _ttm_window()
-	)
-	# Item.custom_sales_intent filter — same shape as get_sku_assortment.
-	intent_clause = ""
-	if intent == "b2c":
-		intent_clause = "and i.custom_sales_intent like 'B2C%%'"
-	elif intent == "b2b":
-		intent_clause = "and i.custom_sales_intent like 'B2B%%'"
+	mode = tax_mode if tax_mode in TAX_MODES else "excl"
+	intent = intent if intent in ("all", "b2c", "b2b") else "all"
+	company = _resolve_company(company)
+	period = _period_for(from_date, to_date)
+	period_info = _period_dict(period, company)
+	top_n_customers = max(int(top_n_customers or 10), 1)
+	top_n_categories = max(int(top_n_categories or 10), 1)
 
-	# Customer Group scope from Company Dashboard Settings. Empty → every group with
-	# sales (plus (unassigned)). Non-empty → filter to those groups + their NSM
-	# descendants, and roll descendant rows UP into the admin-selected parent via
-	# ``root_map`` — so picking a parent like "Channel" yields a single "Channel" row
-	# aggregating all children, rather than one row per child.
+	# Customer Group scope from settings: empty → every group (plus "(unassigned)").
+	# Otherwise only those groups and their descendants, rolled up into the selected root.
 	scope_map = get_segment_root_map()
-	allowed_groups = list(scope_map.keys())
-	scope_params: dict[str, object] = {}
-	scope_clause = ""
-	if allowed_groups:
-		scope_clause = "and c.customer_group in %(allowed_groups)s"
-		scope_params["allowed_groups"] = tuple(allowed_groups)
+	allowed = set(scope_map) if scope_map else None
 
 	def remap(seg: str) -> str:
-		"""Collapse descendant group names into their selected root; no-op when scope empty."""
 		return scope_map.get(seg, seg) if scope_map else seg
 
-	# Per-group rollup over the current and prior period.
-	def _rollup(p_from: date, p_to: date) -> dict[str, dict]:
-		rows = frappe.db.sql(
-			f"""
-			select
-				coalesce(c.customer_group, '(unassigned)')                                          as segment,
-				coalesce(sum({amt_expr}), 0)                                                         as revenue,
-				coalesce(sum({AMT_EXCL}), 0)                                                          as revenue_excl,
-				coalesce(sum(
-					coalesce(nullif(sii.incoming_rate, 0), dni.incoming_rate, 0) * sii.stock_qty
-				), 0)                                                                                 as cogs,
-				coalesce(sum(case when sii.incoming_rate > 0 or dni.incoming_rate > 0 then {AMT_EXCL} else 0 end), 0) as rev_valuated,
-				si.customer                                                                          as customer,
-				count(distinct si.name)                                                              as invoices
-			from {SII_BASE_FROM}
-			left join `tabDelivery Note Item` dni on dni.name = sii.dn_detail
-			where {SII_BASE_WHERE}
-			  {intent_clause}
-			  {scope_clause}
-			group by segment, si.customer
-			""",
-			{"from": p_from, "to": p_to, **scope_params},
-			as_dict=True,
-		)
-		# Remap descendant-group rows to their selected root, then roll up.
-		out: dict[str, dict] = {}
-		for r in rows:
-			seg = remap(r["segment"])
-			bucket = out.setdefault(
-				seg,
-				{
-					"segment": seg,
-					"revenue": 0.0,
-					"revenue_excl": 0.0,
-					"cogs": 0.0,
-					"rev_valuated": 0.0,
-					"_customers": set(),
-					"invoices": 0,
-				},
-			)
-			bucket["revenue"] += flt(r["revenue"])
-			bucket["revenue_excl"] += flt(r["revenue_excl"])
-			bucket["cogs"] += flt(r["cogs"])
-			bucket["rev_valuated"] += flt(r["rev_valuated"])
-			if r.get("customer"):
-				bucket["_customers"].add(r["customer"])
-			bucket["invoices"] += int(r["invoices"])
-		for bucket in out.values():
-			bucket["customers"] = len(bucket.pop("_customers"))
-		return out
+	all_lines = _sales_lines(company, period.from_date, period.to_date)
+	lines = [ln for ln in _intent_filter(all_lines, intent) if allowed is None or ln.segment in allowed]
 
-	current = _rollup(period.from_date, period.to_date)
-	prior = _rollup(period.prior_from, period.prior_to)
-
-	# Per-group monthly revenue (with descendant rollup).
-	monthly_rows = frappe.db.sql(
-		f"""
-		select
-			coalesce(c.customer_group, '(unassigned)')     as segment,
-			year(si.posting_date)                          as yr,
-			month(si.posting_date)                         as mo,
-			coalesce(sum({amt_expr}), 0)                   as revenue
-		from {SII_BASE_FROM}
-		where {SII_BASE_WHERE}
-		  {intent_clause}
-		  {scope_clause}
-		group by segment, yr, mo
-		""",
-		{"from": period.from_date, "to": period.to_date, **scope_params},
-		as_dict=True,
-	)
 	month_keys: list[str] = []
 	cursor = period.from_date.replace(day=1)
 	while cursor <= period.to_date:
 		month_keys.append(f"{cursor.year}-{cursor.month:02d}")
 		cursor = getdate(add_months(cursor, 1))
 
-	monthly_per_segment: dict[str, dict[str, float]] = {}
-	for r in monthly_rows:
-		seg = remap(r["segment"])
-		key = f"{int(r['yr'])}-{int(r['mo']):02d}"
-		bucket = monthly_per_segment.setdefault(seg, {k: 0.0 for k in month_keys})
-		if key in bucket:
-			bucket[key] = round(bucket[key] + flt(r["revenue"]) / 1_00_000, 2)
-
-	# Top customers per segment (rolled up into the selected root).
-	top_customers_rows = frappe.db.sql(
-		f"""
-		select
-			coalesce(c.customer_group, '(unassigned)')                              as segment,
-			si.customer                                                              as customer,
-			coalesce(c.customer_name, si.customer)                                   as customer_name,
-			coalesce(sum({amt_expr}), 0)                                             as revenue,
-			count(distinct si.name)                                                  as invoices
-		from {SII_BASE_FROM}
-		where {SII_BASE_WHERE}
-		  {intent_clause}
-		  {scope_clause}
-		group by segment, si.customer, customer_name
-		order by revenue desc
-		""",
-		{"from": period.from_date, "to": period.to_date, **scope_params},
-		as_dict=True,
-	)
-	top_customers_per_segment: dict[str, list[dict]] = {}
-	# First aggregate per (root_segment, customer) in case the same customer is in
-	# multiple descendants (shouldn't happen, but be defensive).
-	per_seg_per_cust: dict[str, dict[str, dict]] = {}
-	for r in top_customers_rows:
-		seg = remap(r["segment"])
-		cust = r["customer"]
-		entry = per_seg_per_cust.setdefault(seg, {}).setdefault(
-			cust,
-			{
-				"customer": cust,
-				"customer_name": r["customer_name"],
+	segs: dict[str, dict] = {}
+	for ln in lines:
+		seg = remap(ln.segment)
+		s = segs.get(seg)
+		if s is None:
+			s = segs[seg] = {
+				"segment": seg,
 				"revenue": 0.0,
-				"invoices": 0,
-			},
-		)
-		entry["revenue"] += flt(r["revenue"])
-		entry["invoices"] += int(r["invoices"])
-	for seg, by_cust in per_seg_per_cust.items():
-		ranked = sorted(by_cust.values(), key=lambda e: e["revenue"], reverse=True)
-		top_customers_per_segment[seg] = ranked[: int(top_n_customers)]
-
-	# Top categories per segment (rolled up into the selected root).
-	top_cat_rows = frappe.db.sql(
-		f"""
-		select
-			coalesce(c.customer_group, '(unassigned)')                              as segment,
-			coalesce(i.item_group, 'Unclassified')                                   as category,
-			sii.item_code                                                            as item_code,
-			coalesce(sum({amt_expr}), 0)                                             as revenue
-		from {SII_BASE_FROM}
-		where {SII_BASE_WHERE}
-		  {intent_clause}
-		  {scope_clause}
-		group by segment, category, sii.item_code
-		""",
-		{"from": period.from_date, "to": period.to_date, **scope_params},
-		as_dict=True,
-	)
-	per_seg_per_cat: dict[str, dict[str, dict]] = {}
-	for r in top_cat_rows:
-		seg = remap(r["segment"])
-		cat = r["category"]
-		entry = per_seg_per_cat.setdefault(seg, {}).setdefault(
-			cat, {"category": cat, "sku_count": 0, "revenue": 0.0, "_skus": set()}
-		)
-		entry["revenue"] += flt(r["revenue"])
-		entry["_skus"].add(r["item_code"])
-	top_cat_per_segment: dict[str, list[dict]] = {}
-	for seg, by_cat in per_seg_per_cat.items():
-		ranked = sorted(by_cat.values(), key=lambda e: e["revenue"], reverse=True)
-		top_cat_per_segment[seg] = [
-			{
-				"category": c["category"],
-				"sku_count": len(c["_skus"]),
-				"revenue": c["revenue"],
+				"revenue_excl": 0.0,
+				"_lines": [],
+				"cogs": 0.0,
+				"_customers": {},
+				"_invoices": set(),
+				"_monthly": dict.fromkeys(month_keys, 0.0),
+				"_cats": {},
 			}
-			for c in ranked[: int(top_n_categories)]
-		]
+		r = ln.rev(mode)
+		s["revenue"] += r
+		s["revenue_excl"] += ln.rev_excl
+		s["cogs"] += ln.allocated_cost
+		s["_lines"].append(ln)
+		s["_invoices"].add(ln.invoice)
+		cust = s["_customers"].setdefault(
+			ln.customer,
+			{"customer": ln.customer, "customer_name": ln.customer_name, "revenue": 0.0, "_inv": set()},
+		)
+		cust["revenue"] += r
+		cust["_inv"].add(ln.invoice)
+		if ln.month in s["_monthly"]:
+			s["_monthly"][ln.month] += r
+		cat = s["_cats"].setdefault(
+			ln.item_group, {"category": ln.item_group, "revenue": 0.0, "_skus": set()}
+		)
+		cat["revenue"] += r
+		cat["_skus"].add(ln.item_code)
 
-	# Assemble per-segment payload, sorted by revenue desc.
+	prior = _segment_prior(company, period, mode, intent, remap, allowed)
+	prior_ok = period_info["prior"]["available"]
+
 	segments: list[dict] = []
-	total_rev_val = 0.0  # tax-exclusive valuated revenue — coherent blended-margin denominator
-	for seg, cur in current.items():
-		rev = flt(cur["revenue"])
-		# Margin is ALWAYS tax-exclusive: COGS (incoming_rate) is net of GST, so both
-		# rev_valuated and its coverage denominator use AMT_EXCL regardless of the display
-		# tax_mode. Matching net COGS against tax-inclusive revenue would inflate every
-		# segment's margin by ~the GST rate (the same rule get_overview / _gross_margin
-		# enforce). `revenue` still honours tax_mode for display.
-		rev_excl = flt(cur["revenue_excl"])
-		rev_val = flt(cur["rev_valuated"])
-		cogs = flt(cur["cogs"])
-		gp = rev_val - cogs
-		gm_pct = (gp / rev_val * 100) if rev_val else 0.0
-		coverage = (rev_val / rev_excl * 100) if rev_excl else 0.0
-		total_rev_val += rev_val
-		invoices = int(cur["invoices"])
-		customers = int(cur["customers"])
-		prev = prior.get(seg, {})
-		prev_rev = flt(prev.get("revenue", 0))
-		yoy = ((rev - prev_rev) / prev_rev * 100) if prev_rev else None
+	for seg, s in segs.items():
+		rev, rev_excl = s["revenue"], s["revenue_excl"]
+		invoices, customers = len(s["_invoices"]), len(s["_customers"])
+		gp = rev_excl - s["cogs"]
+		prev = prior.get(seg, 0.0)
+		ranked_customers = sorted(s["_customers"].values(), key=lambda c: c["revenue"], reverse=True)
+		ranked_cats = sorted(s["_cats"].values(), key=lambda c: c["revenue"], reverse=True)
 		segments.append(
 			{
 				"segment": seg,
 				"revenue": rev,
-				"prior_revenue": prev_rev,
-				"yoy_pct": yoy,
+				"revenue_excl": rev_excl,
+				"prior_revenue": prev,
+				"yoy_pct": ((rev - prev) / abs(prev) * 100) if (prior_ok and prev) else None,
 				"customers": customers,
 				"invoices": invoices,
-				"aov": (rev / invoices) if invoices else 0.0,
-				"avg_customer_value": (rev / customers) if customers else 0.0,
+				"aov": (rev / invoices) if invoices else None,
+				"avg_customer_value": (rev / customers) if customers else None,
+				"cogs": s["cogs"],
 				"gp": gp,
-				"gm_pct": gm_pct,
-				"gm_coverage_pct": coverage,
-				"monthly": monthly_per_segment.get(seg, {k: 0.0 for k in month_keys}),
-				"top_customers": top_customers_per_segment.get(seg, []),
-				"top_categories": top_cat_per_segment.get(seg, []),
+				"gm_pct": _pct(gp, rev_excl),
+				"gm_coverage_pct": _coverage(s["_lines"]),
+				"monthly": {k: round(v / 1_00_000, 2) for k, v in s["_monthly"].items()},
+				"top_customers": [
+					{
+						"customer": c["customer"],
+						"customer_name": c["customer_name"],
+						"revenue": c["revenue"],
+						"invoices": len(c["_inv"]),
+					}
+					for c in ranked_customers[:top_n_customers]
+				],
+				"top_categories": [
+					{"category": c["category"], "sku_count": len(c["_skus"]), "revenue": c["revenue"]}
+					for c in ranked_cats[:top_n_categories]
+				],
 			}
 		)
 	segments.sort(key=lambda s: s["revenue"], reverse=True)
 
+	total_rev_excl = sum(s["revenue_excl"] for s in segments)
+	company_rev_excl = sum(ln.rev_excl for ln in all_lines)
+	pl = _pl_breakdown(company, period, company_rev_excl)
+	scope_share = (total_rev_excl / company_rev_excl) if company_rev_excl else 0.0
+	unallocated = (pl["cogs"] - sum(ln.allocated_cost for ln in all_lines)) * scope_share
+	gp_lines = sum(s["gp"] for s in segments)
+	invoices_total = len({ln.invoice for ln in lines})
+	revenue_total = sum(s["revenue"] for s in segments)
 	totals = {
-		"revenue": sum(s["revenue"] for s in segments),
-		"customers": sum(s["customers"] for s in segments),
-		"invoices": sum(s["invoices"] for s in segments),
-		"gp": sum(s["gp"] for s in segments),
+		"revenue": revenue_total,
+		"revenue_excl": total_rev_excl,
+		"prior_revenue": sum(prior.values()),
+		"customers": len({ln.customer for ln in lines}),
+		"invoices": invoices_total,
+		"gp": gp_lines,
+		"gm_pct": _pct(gp_lines, total_rev_excl),
+		"cogs_unallocated": unallocated,
+		"gp_after_unallocated": gp_lines - unallocated - pl["totals"]["direct"] * scope_share,
 		"segment_count": len(segments),
+		"aov": (revenue_total / invoices_total) if invoices_total else None,
 	}
-	totals["aov"] = (totals["revenue"] / totals["invoices"]) if totals["invoices"] else 0.0
-	# Blended margin = total valuated GP / total valuated (tax-exclusive) revenue — a
-	# coherent ratio: numerator and denominator span the same valuated lines. (Previously
-	# this divided valuated GP by full display revenue over a different segment subset,
-	# which both understated the ratio and, in incl mode, mixed GST into the denominator.)
-	totals["gm_pct"] = (totals["gp"] / total_rev_val * 100) if total_rev_val else 0.0
+	totals["gm_pct_after_unallocated"] = _pct(totals["gp_after_unallocated"], total_rev_excl)
 
+	quality = _quality(lines)
+	quality["warnings"] = pl["warnings"]
 	return {
-		"period": period.as_dict(),
-		"company": _default_company(),
+		"period": period_info,
+		"company": company,
 		"tax_mode": mode,
-		"intent": intent if intent in ("all", "b2c", "b2b") else "all",
-		"scope_roots": sorted({v for v in scope_map.values()}),
+		"basis": {"revenue": mode, "margins": "excl"},
+		"intent": intent,
+		"scope_roots": sorted(set(scope_map.values())),
+		"is_scoped": bool(scope_map) or intent != "all",
 		"month_keys": month_keys,
 		"segments": segments,
 		"totals": totals,
+		"data_quality": quality,
 	}
+
+
+# ── Users and fiscal years ─────────────────────────────────────────────────
 
 
 @frappe.whitelist()
@@ -1159,13 +1633,16 @@ def create_dashboard_user(
 ) -> dict:
 	"""Provision a dashboard-only user with MIS and/or WC Viewer roles.
 
-	Always restricted to System Manager. Idempotent: existing users get roles
-	updated and password rotated only when explicitly supplied.
+	Restricted to System Managers. Only the two viewer roles are added or removed —
+	every other role the user has is left alone. Administrators and System Managers
+	can't be changed here, and a password is only set on users that have no other roles.
 	"""
 	if frappe.session.user != "Administrator" and "System Manager" not in frappe.get_roles(
 		frappe.session.user
 	):
 		frappe.throw(_("Only a System Manager can create dashboard users."), frappe.PermissionError)
+
+	from frappe.utils import validate_email_address
 
 	from company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings import (
 		MIS_VIEWER_ROLE,
@@ -1174,26 +1651,49 @@ def create_dashboard_user(
 		ensure_wc_viewer_role,
 	)
 
+	email = (email or "").strip()
+	validate_email_address(email, throw=True)
+	mis, wc, send_welcome_email = sbool(mis), sbool(wc), sbool(send_welcome_email)
 	ensure_mis_viewer_role()
 	ensure_wc_viewer_role()
 
+	viewer_roles = {MIS_VIEWER_ROLE, WC_VIEWER_ROLE}
+	automatic = set(
+		getattr(frappe.permissions, "AUTOMATIC_ROLES", ("Administrator", "Guest", "All", "Desk User"))
+	)
 	existing = frappe.db.exists("User", email)
 	if existing:
-		user = frappe.get_doc("User", email)
+		user = frappe.get_doc("User", existing)
+		current = {r.role for r in user.roles}
+		if user.name in ("Administrator", "Guest") or "System Manager" in current:
+			frappe.throw(
+				_("{0} is an administrator. Change their roles from the User form, not here.").format(
+					user.name
+				),
+				frappe.PermissionError,
+			)
+		other_roles = current - viewer_roles - automatic
+		if password and other_roles:
+			frappe.throw(
+				_("{0} has other roles ({1}). Their password can only be changed from the User form.").format(
+					user.name, ", ".join(sorted(other_roles))
+				),
+				frappe.PermissionError,
+			)
 	else:
 		user = frappe.new_doc("User")
 		user.email = email
-		user.username = email.split("@")[0]
 		user.first_name = first_name
 		user.last_name = last_name
 		user.user_type = "System User"
 		user.send_welcome_email = 1 if send_welcome_email else 0
+		current = set()
 
-	user.set("roles", [])
-	if mis:
-		user.append("roles", {"role": MIS_VIEWER_ROLE})
-	if wc:
-		user.append("roles", {"role": WC_VIEWER_ROLE})
+	wanted = {MIS_VIEWER_ROLE: mis, WC_VIEWER_ROLE: wc}
+	for role, on in wanted.items():
+		if on and role not in current:
+			user.append("roles", {"role": role})
+	user.set("roles", [r for r in user.roles if wanted.get(r.role, True)])
 
 	if password:
 		user.new_password = password
@@ -1219,15 +1719,21 @@ create_mis_user = create_dashboard_user
 
 
 @frappe.whitelist()
-def get_fiscal_years() -> list[dict]:
-	"""List of non-disabled Fiscal Years, newest first, for the period picker."""
+def get_fiscal_years(company: str | None = None) -> list[dict]:
+	"""Non-disabled Fiscal Years that apply to the company, newest first."""
 	_require_mis_access()
+	company = _resolve_company(company)
 	rows = frappe.get_all(
 		"Fiscal Year",
 		filters={"disabled": 0},
 		fields=["name", "year_start_date", "year_end_date"],
 		order_by="year_start_date desc",
 	)
+	links: dict[str, set[str]] = defaultdict(set)
+	for parent, comp in frappe.db.sql(
+		"select parent, company from `tabFiscal Year Company` where parenttype = 'Fiscal Year'"
+	):
+		links[parent].add(comp)
 	return [
 		{
 			"name": r["name"],
@@ -1235,155 +1741,139 @@ def get_fiscal_years() -> list[dict]:
 			"to": r["year_end_date"].isoformat() if r["year_end_date"] else None,
 		}
 		for r in rows
+		if not links.get(r["name"]) or company in links[r["name"]]
 	]
+
+
+# ── Whitelisted, cached endpoints ──────────────────────────────────────────
 
 
 @frappe.whitelist()
 def get_overview(
-	tax_mode: str = "incl",
+	tax_mode: str = "excl",
 	from_date: str | None = None,
 	to_date: str | None = None,
+	company: str | None = None,
 ) -> dict:
-	"""Overview KPIs + monthly trend + category mix (24-hour prepared-report cache)."""
+	"""Overview KPIs + P&L ladder + monthly trend + category mix (24-hour cache)."""
 	_require_mis_access()
 	from company_dashboard.api.report_cache import get_or_compute as _cached
-	params = {"tax_mode": tax_mode, "from_date": from_date, "to_date": to_date, **_ttm_cache_anchor(from_date, to_date)}
-	return _cached("mis", "overview", lambda: _compute_overview(tax_mode, from_date, to_date), params)
+
+	company = _resolve_company(company)
+	params = {
+		"company": company,
+		"tax_mode": tax_mode,
+		"from_date": from_date,
+		"to_date": to_date,
+		**_ttm_cache_anchor(from_date, to_date),
+	}
+	kwargs = {"tax_mode": tax_mode, "from_date": from_date, "to_date": to_date, "company": company}
+	return _cached(
+		"mis",
+		"overview",
+		lambda: _compute_overview(**kwargs),
+		params,
+		job=("company_dashboard.api.mis._compute_overview", kwargs),
+	)
 
 
-def _compute_overview(
-	tax_mode: str = "incl",
+@frappe.whitelist()
+def get_sku_assortment(
+	tax_mode: str = "excl",
 	from_date: str | None = None,
 	to_date: str | None = None,
+	intent: str = "all",
+	company: str | None = None,
 ) -> dict:
-	if not _erpnext_installed():
-		frappe.throw(_("ERPNext is not installed on this site."))
+	"""Per-SKU revenue, stock-ledger cost, monthly trend and CM allocation (24-hour cache)."""
+	_require_mis_access()
+	from company_dashboard.api.report_cache import get_or_compute as _cached
 
-	mode = tax_mode if tax_mode in TAX_MODES else "incl"
-	amt_expr = TAX_MODES[mode]
-	company = _default_company()
-
-	if from_date and to_date:
-		period = _custom_window(getdate(from_date), getdate(to_date))
-	else:
-		period = _ttm_window()
-	cur = _revenue_by_bucket(period.from_date, period.to_date, amt_expr)
-	prior = _revenue_by_bucket(period.prior_from, period.prior_to, amt_expr)
-
-	# Margin and CM tiers are ALWAYS computed tax-exclusive regardless of display tax_mode.
-	# COGS (incoming_rate) and GL deductions are net of GST; matching them against
-	# tax-inclusive revenue would inflate margin by the GST%. Revenue *display* still
-	# honours tax_mode.
-	# CM ladder:
-	#   CM1 = Gross Margin = (Revenue − COGS) / Revenue               ← = margin
-	#   CM2 = CM1 − freight − packaging − txn fees − schemes          ← variable fulfillment
-	#   CM3 = CM2 − marketing                                         ← customer acquisition
-	margin = _gross_margin(period, AMT_EXCL)
-	rev_excl = _revenue_by_bucket(period.from_date, period.to_date, AMT_EXCL)
-	cm2 = _cm2(period, company, rev_excl, margin)
-	cm3 = _cm3(
-		period,
-		company,
-		rev_excl,
-		cm2["overall"]["cm2"],
-		cm2["b2c"]["cm2"],
-		cm2["b2b"]["cm2"],
-	)
-	ladder = _ebitda_ebit_pat(
-		period,
-		company,
-		rev_excl,
-		cm3["overall"]["cm3"],
-		cm3["b2c"]["cm3"],
-		cm3["b2b"]["cm3"],
-	)
-	active_skus, avg_mrp = _active_sku_stats(period)
-	monthly = _monthly_revenue(period, amt_expr)
-	categories = _categories_from_item_group(period, amt_expr)
-	excluded = _excluded_customer_stats(period, amt_expr)
-
-	return {
-		"period": period.as_dict(),
+	company = _resolve_company(company)
+	params = {
 		"company": company,
-		"tax_mode": mode,
-		"kpi": {
-			"total_revenue": cur["total"],
-			"total_revenue_prior": prior["total"],
-			"b2c_revenue": cur["b2c"],
-			"b2c_revenue_prior": prior["b2c"],
-			"b2b_revenue": cur["b2b"],
-			"b2b_revenue_prior": prior["b2b"],
-			"unclassified_revenue": cur["unclassified"],
-			"gross_profit": margin["gross_profit"],
-			"gross_margin_pct": margin["gross_margin_pct"],
-			"gross_margin_coverage_pct": margin["coverage_pct"],
-			"b2c_gross_profit": margin["b2c"]["gross_profit"],
-			"b2c_gross_margin_pct": margin["b2c"]["gross_margin_pct"],
-			"b2c_gross_margin_coverage_pct": margin["b2c"]["coverage_pct"],
-			"b2b_gross_profit": margin["b2b"]["gross_profit"],
-			"b2b_gross_margin_pct": margin["b2b"]["gross_margin_pct"],
-			"b2b_gross_margin_coverage_pct": margin["b2b"]["coverage_pct"],
-			# CM1 ≡ Gross Margin — surfaced as a separate field so the UI can reason about
-			# the CM ladder without re-deriving it.
-			"cm1": margin["gross_profit"],
-			"cm1_pct": margin["gross_margin_pct"],
-			"b2c_cm1": margin["b2c"]["gross_profit"],
-			"b2c_cm1_pct": margin["b2c"]["gross_margin_pct"],
-			"b2b_cm1": margin["b2b"]["gross_profit"],
-			"b2b_cm1_pct": margin["b2b"]["gross_margin_pct"],
-			# CM2 = CM1 − variable fulfillment (freight + packaging + txn fees + schemes)
-			"cm2": cm2["overall"]["cm2"],
-			"cm2_pct": cm2["overall"]["cm2_pct"],
-			"cm2_deduction": cm2["overall"]["deduction"],
-			"b2c_cm2": cm2["b2c"]["cm2"],
-			"b2c_cm2_pct": cm2["b2c"]["cm2_pct"],
-			"b2b_cm2": cm2["b2b"]["cm2"],
-			"b2b_cm2_pct": cm2["b2b"]["cm2_pct"],
-			# CM3 = CM2 − marketing
-			"cm3": cm3["overall"]["cm3"],
-			"cm3_pct": cm3["overall"]["cm3_pct"],
-			"cm3_deduction": cm3["overall"]["deduction"],
-			"b2c_cm3": cm3["b2c"]["cm3"],
-			"b2c_cm3_pct": cm3["b2c"]["cm3_pct"],
-			"b2b_cm3": cm3["b2b"]["cm3"],
-			"b2b_cm3_pct": cm3["b2b"]["cm3_pct"],
-			# EBITDA / EBIT / PAT — below CM3 P&L ladder
-			"ebitda": ladder["overall"]["ebitda"],
-			"ebitda_pct": ladder["overall"]["ebitda_pct"],
-			"b2c_ebitda": ladder["b2c"]["ebitda"],
-			"b2c_ebitda_pct": ladder["b2c"]["ebitda_pct"],
-			"b2b_ebitda": ladder["b2b"]["ebitda"],
-			"b2b_ebitda_pct": ladder["b2b"]["ebitda_pct"],
-			"ebit": ladder["overall"]["ebit"],
-			"ebit_pct": ladder["overall"]["ebit_pct"],
-			"b2c_ebit": ladder["b2c"]["ebit"],
-			"b2c_ebit_pct": ladder["b2c"]["ebit_pct"],
-			"b2b_ebit": ladder["b2b"]["ebit"],
-			"b2b_ebit_pct": ladder["b2b"]["ebit_pct"],
-			"pbt": ladder["overall"]["pbt"],
-			"pbt_pct": ladder["overall"]["pbt_pct"],
-			"pat": ladder["overall"]["pat"],
-			"pat_pct": ladder["overall"]["pat_pct"],
-			"b2c_pat": ladder["b2c"]["pat"],
-			"b2c_pat_pct": ladder["b2c"]["pat_pct"],
-			"b2b_pat": ladder["b2b"]["pat"],
-			"b2b_pat_pct": ladder["b2b"]["pat_pct"],
-			"active_skus": active_skus,
-			"avg_mrp": avg_mrp,
-		},
-		"cm2_inputs": cm2["inputs"],
-		"cm3_inputs": cm3["inputs"],
-		"ladder_inputs": ladder["inputs"],
-		"monthly": monthly,
-		"categories": categories,
-		"settings": {
-			"outbound_freight_accounts": get_configured_accounts("outbound_freight_accounts"),
-			"packaging_overhead_accounts": get_configured_accounts("packaging_overhead_accounts"),
-		},
-		"debug": {
-			"classification": "Item.custom_sales_intent (B2C*/B2B*)",
-			"tax_mode": mode,
-			"excluded_internal": excluded,
-			"generated_at": datetime.now(timezone.utc).isoformat(),
+		"tax_mode": tax_mode,
+		"from_date": from_date,
+		"to_date": to_date,
+		"intent": intent,
+		**_ttm_cache_anchor(from_date, to_date),
+	}
+	kwargs = {
+		"tax_mode": tax_mode,
+		"from_date": from_date,
+		"to_date": to_date,
+		"intent": intent,
+		"company": company,
+	}
+	return _cached(
+		"mis",
+		"sku_assortment",
+		lambda: _compute_sku_assortment(**kwargs),
+		params,
+		job=("company_dashboard.api.mis._compute_sku_assortment", kwargs),
+	)
+
+
+@frappe.whitelist()
+def get_customer_segments(
+	tax_mode: str = "excl",
+	from_date: str | None = None,
+	to_date: str | None = None,
+	intent: str = "all",
+	top_n_customers: int = 10,
+	top_n_categories: int = 10,
+	company: str | None = None,
+) -> dict:
+	"""Per-Customer-Group analysis (24-hour cache)."""
+	_require_mis_access()
+	from company_dashboard.api.report_cache import get_or_compute as _cached
+
+	company = _resolve_company(company)
+	# top_n_* change the sliced row counts, so they must be in the cache key.
+	params = {
+		"company": company,
+		"tax_mode": tax_mode,
+		"from_date": from_date,
+		"to_date": to_date,
+		"intent": intent,
+		"top_n_customers": top_n_customers,
+		"top_n_categories": top_n_categories,
+		**_ttm_cache_anchor(from_date, to_date),
+	}
+	kwargs = {
+		"tax_mode": tax_mode,
+		"from_date": from_date,
+		"to_date": to_date,
+		"intent": intent,
+		"top_n_customers": top_n_customers,
+		"top_n_categories": top_n_categories,
+		"company": company,
+	}
+	return _cached(
+		"mis",
+		"customer_segments",
+		lambda: _compute_customer_segments(**kwargs),
+		params,
+		job=("company_dashboard.api.mis._compute_customer_segments", kwargs),
+	)
+
+
+@frappe.whitelist()
+def get_ui_flags() -> dict:
+	"""Fresh 'Coming soon' tile flags and section access, so a settings change applies on the
+	next page load without waiting for the cached boot payload."""
+	_require_dashboard_access()
+	from company_dashboard.company_dashboard.doctype.company_dashboard_settings.company_dashboard_settings import (
+		get_coming_soon_tiles,
+	)
+
+	user = frappe.session.user
+	roles = set(frappe.get_roles(user))
+	is_admin = user == "Administrator"
+	return {
+		"coming_soon_tiles": get_coming_soon_tiles(),
+		"sections": {
+			"mis": is_admin or bool(roles & MIS_ACCESS_ROLES),
+			"wc": is_admin or bool(roles & WC_ACCESS_ROLES),
 		},
 	}

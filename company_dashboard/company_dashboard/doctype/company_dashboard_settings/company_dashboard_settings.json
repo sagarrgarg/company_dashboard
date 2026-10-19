@@ -9,6 +9,10 @@
   "intro_html",
   "segments_section",
   "customer_segment_groups",
+  "cm1_section",
+  "sales_income_accounts",
+  "column_break_cm1",
+  "direct_cost_accounts",
   "cm2_section",
   "outbound_freight_accounts",
   "packaging_overhead_accounts",
@@ -43,8 +47,13 @@
   "coming_soon_income_tax",
   "wc_section",
   "wc_exclude_customer_groups",
+  "wc_internal_accounts",
   "column_break_wc",
   "wc_exclude_supplier_groups",
+  "wc_gateway_accounts",
+  "pricing_section",
+  "mrp_price_list",
+  "seeded_fields",
   "notes_section",
   "notes"
  ],
@@ -56,7 +65,7 @@
   {
    "fieldname": "intro_html",
    "fieldtype": "HTML",
-   "options": "<div style='padding:12px 14px;background:#f7f5f0;border-left:3px solid #1f5f33;border-radius:4px;font-size:13px;line-height:1.6;color:#574f3e'><b>P&amp;L framework — MIS Overview waterfall:</b><br><b>CM1 = Gross Margin</b> = (Revenue − COGS) / Revenue — no config, derived from Sales Invoice × incoming_rate.<br><b>CM2 = CM1 − Variable fulfillment</b> (freight, packaging, transaction fees, schemes).<br><b>CM3 = CM2 − Marketing</b> (online + offline).<br><b>EBITDA = CM3 − Fixed operating overhead</b> (salary, rent, utilities, admin).<br><b>EBIT = EBITDA − Depreciation & Amortization.</b><br><b>PAT = EBIT − Interest & Finance − Income Tax Expense.</b><br>Each account multiselect below maps 1:1 to a line in that waterfall.</div>"
+   "options": "<div style='padding:12px 14px;background:#f7f5f0;border-left:3px solid #1f5f33;border-radius:4px;font-size:13px;line-height:1.6;color:#574f3e'><b>P&amp;L framework — every line comes from the GL, and PAT always equals GL net profit:</b><br><b>Revenue</b> = Sales Invoice lines (net of returns, tax-exclusive) booked to the Sales accounts below, external customers only.<br><b>CM1 = Revenue − Cost of goods − Direct costs.</b> Cost of goods = every Cost of Goods Sold and Stock Adjustment account in the GL.<br><b>CM2 = CM1 − Variable fulfillment</b> (freight, packaging, transaction fees, schemes).<br><b>CM3 = CM2 − Marketing</b> (online + offline).<br><b>EBITDA = CM3 − Fixed operating overhead</b> (salary, rent, utilities, admin) − Other expenses + Other income.<br><b>EBIT = EBITDA − Depreciation &amp; Amortization. PBT = EBIT − Interest. PAT = PBT − Income tax.</b><br>Pick leaf <b>Expense</b> accounts only (the tax bucket also accepts Income accounts, netted), and each account in one bucket. Any P&amp;L account not mapped here appears as <b>Other expenses / Other income</b>, so nothing is lost.</div>"
   },
   {
    "fieldname": "segments_section",
@@ -69,6 +78,29 @@
    "fieldtype": "Table MultiSelect",
    "label": "Customer Groups to show",
    "options": "Company Dashboard Customer Group Link"
+  },
+  {
+   "fieldname": "cm1_section",
+   "fieldtype": "Section Break",
+   "label": "Revenue & CM1 — Gross margin"
+  },
+  {
+   "fieldname": "sales_income_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Sales accounts (Revenue)",
+   "options": "Company Dashboard Account Link",
+   "description": "Income accounts that count as revenue. Sales Invoice lines booked to any other income account are left out of revenue and show up as Other income. Empty = every income account used on Sales Invoices."
+  },
+  {
+   "fieldname": "column_break_cm1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "direct_cost_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Direct costs (CM1)",
+   "options": "Company Dashboard Account Link",
+   "description": "Expense accounts deducted in CM1 next to cost of goods (e.g. Direct Overheads, Freight Inward). Cost of Goods Sold and Stock Adjustment accounts are always included automatically — don't add them here."
   },
   {
    "fieldname": "cm2_section",
@@ -271,6 +303,13 @@
    "options": "Company Dashboard Customer Group Link"
   },
   {
+   "fieldname": "wc_internal_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Internal / inter-branch accounts (excluded from WC)",
+   "options": "Company Dashboard Account Link",
+   "description": "Receivable, payable and cost-of-goods accounts used for internal transfers (e.g. Internal Debtor, Internal Creditor, Internal COGS). Their balances are shown as a reconciling item, not trade working capital."
+  },
+  {
    "fieldname": "column_break_wc",
    "fieldtype": "Column Break"
   },
@@ -280,6 +319,33 @@
    "fieldtype": "Table MultiSelect",
    "label": "Exclude Supplier Groups (WC Payable)",
    "options": "Company Dashboard Supplier Group Link"
+  },
+  {
+   "fieldname": "wc_gateway_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "Payment gateway / clearing accounts",
+   "options": "Company Dashboard Account Link",
+   "description": "Bank-type accounts that are really receivables from payment gateways or marketplaces (Razorpay, Pine Labs, Amazon…). Shown as 'Gateway receivables', not cash."
+  },
+  {
+   "fieldname": "pricing_section",
+   "fieldtype": "Section Break",
+   "label": "Pricing"
+  },
+  {
+   "fieldname": "mrp_price_list",
+   "fieldtype": "Link",
+   "label": "MRP Price List",
+   "options": "Price List",
+   "description": "Price list holding MRP, used for the Average MRP KPI. Empty = a price list named 'MRP' if one exists."
+  },
+  {
+   "fieldname": "seeded_fields",
+   "fieldtype": "Small Text",
+   "label": "Seeded fields",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Internal: account fields already auto-filled once, so migrate never re-fills a field the admin emptied."
   },
   {
    "fieldname": "notes_section",
@@ -296,7 +362,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-04-16 00:00:00",
+ "modified": "2026-10-20 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Company Dashboard",
  "name": "Company Dashboard Settings",
