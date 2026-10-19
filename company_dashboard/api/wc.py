@@ -167,6 +167,14 @@ def _party_side(company: str, party_type: str, as_of: date) -> dict:
 		"internal_accounts_total": internal,
 		"trade_accounts": trade_accounts,
 		"internal_accounts": internal_accounts,
+		# Control-account balances behind the net figure (side-signed). Excluded internal
+		# parties are a separate line, so these add up to net + excluded_parties_total.
+		"account_balances": [
+			{"account": a, "amount": sign * b.bal}
+			for a, b in sorted(
+				_balances(company, trade_accounts, as_of).items(), key=lambda kv: -abs(kv[1].bal)
+			)
+		],
 	}
 
 
@@ -607,7 +615,8 @@ def _collection_efficiency(company: str, ar: dict, as_of: date) -> dict:
 
 def _stock_section(company: str, as_of: date) -> dict:
 	stock_accounts = [a.name for a in _leaf_accounts(company, ("Stock",), ("Asset",))]
-	gl_stock = sum(b.bal for b in _balances(company, stock_accounts, as_of).values())
+	stock_bal = _balances(company, stock_accounts, as_of)
+	gl_stock = sum(b.bal for b in stock_bal.values())
 
 	bins = frappe.db.sql(
 		"""
@@ -639,6 +648,9 @@ def _stock_section(company: str, as_of: date) -> dict:
 	return {
 		"stock_in_hand": gl_stock,
 		"stock_accounts": stock_accounts,
+		"stock_account_balances": [
+			{"account": a, "amount": b.bal} for a, b in sorted(stock_bal.items(), key=lambda kv: -abs(kv[1].bal))
+		],
 		"bin_total": bin_total,
 		"bin_vs_gl_gap": bin_total - gl_stock,
 		"negative_bins": {"count": len(negative), "value": sum(flt(b.stock_value) for b in negative)},
@@ -849,6 +861,7 @@ def _compute_wc_snapshot(company: str, as_of: date | str) -> dict:
 			"advances": ar["advances"],
 			"internal_accounts_total": ar["internal_accounts_total"],
 			"excluded_parties_total": ar["excluded_parties_total"],
+			"account_balances": ar["account_balances"],
 			"aging": _ageing(bns_ar, ar["gross"]),
 			"top_debtors": _top_parties(ar, bns_ar, "Customer"),
 			"dso": dso,
@@ -863,6 +876,7 @@ def _compute_wc_snapshot(company: str, as_of: date | str) -> dict:
 			"advance_paid": -ap["advances"],
 			"internal_accounts_total": ap["internal_accounts_total"],
 			"excluded_parties_total": ap["excluded_parties_total"],
+			"account_balances": ap["account_balances"],
 			"aging": _ageing(bns_ap, ap["gross"]),
 			"top_creditors": _top_parties(ap, bns_ap, "Supplier"),
 			"dpo": dpo,

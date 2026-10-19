@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { Explain } from "@/components/explain/Explain";
+import { explainSegmentGm } from "@/lib/explain";
+import { useUrlParam } from "@/lib/urlState";
 import {
 	Area,
 	AreaChart,
@@ -48,7 +51,7 @@ const INTENTS: Array<{ key: IntentFilter; label: string; hint: string }> = [
 
 export function CustomerSegmentsPage({ query, onTaxModeChange, onPeriodChange, onLoaded, onRefreshed }: MisPageProps) {
 	const [activeTab, setActiveTab] = useState<string>(ALL_TAB);
-	const [intent, setIntent] = useState<IntentFilter>("all");
+	const [intent, setIntent] = useUrlParam<IntentFilter>("intent", "all", ["all", "b2c", "b2b"] as const);
 	const { data, error, isLoading } = useCustomerSegments(query, intent);
 	const res = data?.message;
 
@@ -242,7 +245,7 @@ function AllSegmentsView({
 	const revBasis = res.basis?.revenue === "incl" ? "incl. tax" : "ex-tax";
 	return (
 		<>
-			<div className="grid grid-cols-5 gap-2.5 mb-4">
+			<div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2.5 mb-4">
 				<KpiTile
 					label="Total Revenue"
 					basis={revBasis}
@@ -326,7 +329,13 @@ function AllSegmentsView({
 											{flags.gross_profit ? <SoonValue /> : formatINR(s.gp)}
 										</td>
 										<td className="px-3 py-2 text-right">
-											<MarginValue pct={s.gm_pct} colorFor={marginColor} />
+											{flags.gross_profit ? (
+												<MarginValue pct={s.gm_pct} colorFor={marginColor} />
+											) : (
+												<Explain content={() => explainSegmentGm(s, res.period.label)} label={`Gross margin of ${s.segment}, has breakdown`}>
+													<MarginValue pct={s.gm_pct} colorFor={marginColor} />
+												</Explain>
+											)}
 										</td>
 									</tr>
 								);
@@ -445,7 +454,7 @@ function SegmentDetail({ segment, res }: { segment: CustomerSegment; res: Custom
 
 	return (
 		<>
-			<div className="grid grid-cols-5 gap-2.5 mb-4">
+			<div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2.5 mb-4">
 				<KpiTile
 					label="Revenue"
 					basis={revBasis}
@@ -470,6 +479,7 @@ function SegmentDetail({ segment, res }: { segment: CustomerSegment; res: Custom
 					basis="ex-tax"
 					value={formatMargin(segment.gm_pct)}
 					valueTitle={marginTitle(segment.gm_pct)}
+					explain={flags.gross_profit ? undefined : explainSegmentGm(segment, res.period.label)}
 					accent={marginAccent(segment.gm_pct)}
 					meta={
 						<>

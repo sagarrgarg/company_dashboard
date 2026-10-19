@@ -1,4 +1,6 @@
 import { cn, PRIOR_INCOMPLETE, type Delta } from "@/lib/utils";
+import { Explain } from "@/components/explain/Explain";
+import type { ExplainContent } from "@/lib/explain";
 
 export type KpiAccent = "default" | "green" | "amber" | "red" | "blue";
 
@@ -13,6 +15,8 @@ export interface KpiTileProps {
 	/** Basis of this tile's figure, e.g. "incl. tax" or "ex-tax". */
 	basis?: string;
 	comingSoon?: boolean;
+	/** Breakdown shown on hover / tap of the value. */
+	explain?: ExplainContent;
 }
 
 const ACCENT: Record<KpiAccent, string> = {
@@ -38,6 +42,7 @@ export function KpiTile({
 	delta,
 	basis,
 	comingSoon = false,
+	explain,
 }: KpiTileProps) {
 	const labelRow = (
 		<div className="kpi-lbl flex items-baseline justify-between gap-2">
@@ -73,9 +78,20 @@ export function KpiTile({
 	return (
 		<div className="kpi">
 			{labelRow}
-			<div className={cn("kpi-val", ACCENT[accent])} title={valueTitle}>
-				{value}
-			</div>
+			{explain ? (
+				<div className={cn("kpi-val", ACCENT[accent])}>
+					<Explain
+						content={valueTitle ? { ...explain, notes: [valueTitle, ...(explain.notes ?? [])] } : explain}
+						label={`${label}, ${value}${explain.valueSub ? `, ${explain.value} ${explain.valueSub}` : `, ${explain.value}`}, has breakdown`}
+					>
+						{value}
+					</Explain>
+				</div>
+			) : (
+				<div className={cn("kpi-val", ACCENT[accent])} title={valueTitle}>
+					{value}
+				</div>
+			)}
 			<div className="kpi-meta flex-wrap">
 				{delta &&
 					(delta.unavailable ? (

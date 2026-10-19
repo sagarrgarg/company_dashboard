@@ -467,6 +467,7 @@ class SalesLine(NamedTuple):
 	stock_qty: float
 	cost: float | None  # stock-ledger cost; None = no stock movement
 	flagged: bool
+	income_account: str = ""
 
 	def rev(self, mode: str) -> float:
 		return self.rev_incl if mode == "incl" else self.rev_excl
@@ -512,7 +513,8 @@ def _sales_lines(company: str, from_date: date, to_date: date) -> list[SalesLine
 			coalesce({AMT_INCL}, 0),
 			coalesce(sii.stock_qty, 0),
 			{LINE_COST},
-			coalesce(ea.account_type, '') in {COGS_TYPES_SQL}
+			coalesce(ea.account_type, '') in {COGS_TYPES_SQL},
+			coalesce(sii.income_account, '')
 		from {SII_BASE_FROM}
 		{LINE_COST_JOINS}
 		where {where}
@@ -521,7 +523,7 @@ def _sales_lines(company: str, from_date: date, to_date: date) -> list[SalesLine
 	)
 
 	# Cost posted outside cost of goods is not part of the split (see LINE_COST).
-	raw = [r if (r[15] is None or r[16]) else (*r[:15], None, r[16]) for r in raw]
+	raw = [r if (r[15] is None or r[16]) else (*r[:15], None, *r[16:]) for r in raw]
 
 	unit_costs: dict[str, list[float]] = defaultdict(list)
 	for r in raw:
@@ -561,6 +563,7 @@ def _sales_lines(company: str, from_date: date, to_date: date) -> list[SalesLine
 				stock_qty=qty,
 				cost=cost,
 				flagged=flagged,
+				income_account=r[17],
 			)
 		)
 	memo[key] = lines
@@ -770,11 +773,15 @@ def _seed_hint_matches(fieldname: str, account_name: str) -> bool:
 	return False
 
 
-def _pl_breakdown(company: str, period: Period, revenue_excl: float) -> dict:
+def _pl_breakdown(
+	company: str, period: Period | None, revenue_excl: float, balances: dict | None = None
+) -> dict:
 	"""Every P&L figure below revenue, from the GL. Mapping problems are reported as
 	warnings and the account falls through to Other expenses / Other income, so the
-	ladder still ties to GL net profit."""
-	balances = _gl_pl_balances(company, period.from_date, period.to_date)
+	ladder still ties to GL net profit. ``balances`` (account → row with ``net``) may be
+	passed in, e.g. one month of a statement; otherwise the period's are read."""
+	if balances is None:
+		balances = _gl_pl_balances(company, period.from_date, period.to_date)
 	labels = {k: lbl for k, _f, lbl in PL_LINES}
 	configured = {k: get_configured_accounts(f) for k, f, _l in PL_LINES}
 	meta = get_account_meta({a for accs in configured.values() for a in accs} | set(_sales_accounts()))
@@ -884,9 +891,51 @@ def _pl_breakdown(company: str, period: Period, revenue_excl: float) -> dict:
 			for r in sorted((r for r in rows if abs(r.net) >= 0.5), key=lambda r: -abs(r.net))[:15]
 		]
 
+	def _items(rows: list) -> list[dict]:
+		"""Every account behind a line, signed as it moves the line (expense +)."""
+		return [
+			{"account": r.account, "amount": r.net, "root_type": r.root_type}
+			for r in sorted(rows, key=lambda r: -abs(r.net))
+			if abs(r.net) >= 0.005
+		]
+
+	line_accounts: dict[str, list[dict]] = {
+		"cogs": _items(cogs_rows),
+		"internal": _items(internal_rows),
+	}
+	for key in PL_KEYS:
+		rows = [balances[a] for a in accounts[key] if a in balances]
+		line_accounts[key] = _items(rows) + [
+			{"account": a, "amount": 0.0, "root_type": None} for a in accounts[key] if a not in balances
+		]
+	# Other = unmapped expenses − (unmapped income − invoice-line revenue). The synthetic
+	# row makes the listed amounts add up to the line exactly.
+	if sales:
+		other_items = _items(unmapped_rows) + _items([r for r in income_rows if r.account not in sales])
+		other_items.append(
+			{
+				"account": None,
+				"label": "Sales accounts in GL less invoice-line revenue",
+				"amount": -(revenue_gl_difference or 0.0),
+				"root_type": "Income",
+			}
+		)
+	else:
+		other_items = _items(unmapped_rows) + _items(income_rows)
+		other_items.append(
+			{
+				"account": None,
+				"label": "Less: revenue already counted from invoice lines",
+				"amount": revenue_excl,
+				"root_type": "Income",
+			}
+		)
+	line_accounts["other"] = other_items
+
 	return {
 		"totals": totals,
 		"accounts": accounts,
+		"line_accounts": line_accounts,
 		"cogs": cogs,
 		"cogs_accounts": [{"account": r.account, "amount": r.net} for r in cogs_rows],
 		"unmapped_expense": unmapped_expense,
@@ -953,9 +1002,99 @@ def _ladder(rev_excl: dict[str, float], line_cost: dict[str, float], pl: dict) -
 	return out
 
 
-def _pnl_steps(row: dict, pl: dict) -> list[dict]:
+TIER_FORMULAS = {
+	"cm1": "Revenue − Cost of goods − Direct costs",
+	"cm2": "CM1 − Freight − Packaging − Transaction fees − Trade schemes",
+	"cm3": "CM2 − Marketing",
+	"ebitda": "CM3 − Salary − Rent − Utilities − Admin − Other (net) − Internal transfers (net)",
+	"ebit": "EBITDA − Depreciation & amortization",
+	"pbt": "EBIT − Interest & finance cost",
+	"pat": "PBT − Income tax",
+}
+BUCKET_LABELS = {"overall": "all items", "b2c": "B2C", "b2b": "B2B", "unclassified": "unclassified"}
+
+
+def _attach_sources(steps: list[dict], row: dict, pl: dict, bucket: str, revenue_sources: list[dict]) -> None:
+	"""Explain every step: the formula, and the ledgers (or derived parts) that make it.
+
+	Source amounts are signed as they move the line: for a cost line + adds cost, −
+	(a credit, e.g. an income account netted in) reduces it. They always add up to the
+	step's value. Bucket steps scale GL accounts by the bucket's revenue share, except
+	revenue (exact, from its own invoice lines) and the stock-ledger part of cost of goods.
+	"""
+	share = row.get("share", 1.0)
+	label = BUCKET_LABELS.get(bucket, bucket)
+	line_accounts = pl.get("line_accounts") or {}
+	prev_tier: dict | None = None
+	since_tier: list[dict] = []
+	for st in steps:
+		key = st["key"]
+		st["bucket"] = bucket
+		if st["kind"] == "anchor":
+			st["formula"] = "Σ invoice-line net amount (ex-tax, returns netted), by income account"
+			st["sources"] = revenue_sources
+			st["share"] = None
+			prev_tier = st
+			since_tier = []
+			continue
+		if st["kind"] == "tier":
+			st["formula"] = TIER_FORMULAS.get(key, "")
+			st["components"] = [
+				{"key": prev_tier["key"], "label": prev_tier["label"], "amount": prev_tier["amount"]},
+				*({"key": d["key"], "label": d["label"], "amount": d["amount"]} for d in since_tier),
+			]
+			st["sources"] = []
+			st["share"] = None
+			prev_tier = st
+			since_tier = []
+			continue
+		since_tier.append(st)
+		value = -st["amount"]
+		if key == "cogs" and bucket != "overall":
+			st["formula"] = (
+				f"Stock-ledger cost of {label} invoice lines + {share * 100:.1f}% of unallocated cost of goods"
+			)
+			st["sources"] = [
+				{
+					"account": None,
+					"label": f"Stock-ledger cost of {label} invoice lines",
+					"amount": row["cogs_allocated"],
+				},
+				{
+					"account": None,
+					"label": f"Share of unallocated cost of goods ({share * 100:.1f}% revenue share)",
+					"amount": row["cogs_unallocated"],
+				},
+			]
+			st["share"] = share
+			continue
+		items = line_accounts.get(key) or []
+		scale = 1.0 if bucket == "overall" else share
+		st["sources"] = [{**it, "amount": it["amount"] * scale} for it in items]
+		st["share"] = None if bucket == "overall" else share
+		n = len([it for it in items if it.get("account")])
+		base = (
+			"Σ Cost of Goods Sold + Stock Adjustment accounts (debit − credit)"
+			if key == "cogs"
+			else f"Σ {n} GL account{'s' if n != 1 else ''} (debit − credit)"
+		)
+		if key == "other":
+			base = "Unmapped expense accounts − unmapped income accounts + revenue reconciling difference"
+		st["formula"] = base if bucket == "overall" else f"{base} × {share * 100:.1f}% revenue share"
+		if key == "cogs":
+			st["split"] = {"allocated": row["cogs_allocated"], "unallocated": row["cogs_unallocated"]}
+		# Guard: rounding of scaled sources must not drift from the step value.
+		drift = value - sum(it["amount"] for it in st["sources"])
+		if abs(drift) >= 0.5:
+			st["sources"].append({"account": None, "label": "Rounding / unlisted", "amount": drift})
+
+
+def _pnl_steps(
+	row: dict, pl: dict, bucket: str = "overall", revenue_sources: list[dict] | None = None
+) -> list[dict]:
 	"""Waterfall steps for one bucket, ex-tax. Deductions are negative; ``subtotal`` is the
-	running total after the step, so the last step equals PAT."""
+	running total after the step, so the last step equals PAT. Each step carries its
+	formula and the ledgers behind it (see ``_attach_sources``)."""
 	accounts = pl["accounts"]
 	steps: list[dict] = []
 	running = row["revenue"]
@@ -1042,10 +1181,32 @@ def _pnl_steps(row: dict, pl: dict) -> list[dict]:
 	tier("pat", "PAT · Profit after tax")
 	for s in steps:
 		s["pct"] = _pct(s["amount"], row["revenue"])
+	_attach_sources(steps, row, pl, bucket, revenue_sources or [])
 	return steps
 
 
 # ── Overview ────────────────────────────────────────────────────────────────
+
+
+def _revenue_sources(lines: list[SalesLine]) -> dict[str, list[dict]]:
+	"""Ex-tax invoice-line revenue by income account, overall and per bucket."""
+	agg: dict[str, dict[str, float]] = {b: defaultdict(float) for b in ("overall", *BUCKETS)}
+	for ln in lines:
+		agg["overall"][ln.income_account] += ln.rev_excl
+		agg[ln.bucket][ln.income_account] += ln.rev_excl
+	return {
+		b: [
+			{
+				"account": acc or None,
+				"label": None if acc else "(no income account)",
+				"amount": amt,
+				"root_type": "Income",
+			}
+			for acc, amt in sorted(vals.items(), key=lambda kv: -abs(kv[1]))
+			if abs(amt) >= 0.005
+		]
+		for b, vals in agg.items()
+	}
 
 
 def _monthly_revenue(period: Period, lines: list[SalesLine], mode: str) -> list[dict]:
@@ -1151,6 +1312,7 @@ def _compute_overview(
 
 	pl = _pl_breakdown(company, period, rev_excl["overall"])
 	ladder = _ladder(rev_excl, line_cost, pl)
+	revenue_sources = _revenue_sources(lines)
 	prior = _revenue_by_bucket(company, period.prior_from, period.prior_to, mode)
 	period_info = _period_dict(period, company)
 	quality = _quality(lines)
@@ -1202,7 +1364,7 @@ def _compute_overview(
 		"tax_mode": mode,
 		"basis": {"revenue": mode, "margins": "excl"},
 		"kpi": kpi,
-		"pnl": {b: _pnl_steps(ladder[b], pl) for b in ("overall", *BUCKETS)},
+		"pnl": {b: _pnl_steps(ladder[b], pl, b, revenue_sources[b]) for b in ("overall", *BUCKETS)},
 		"cm2_inputs": {
 			"freight_total": o["freight"],
 			"packaging_total": o["packaging"],

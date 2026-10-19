@@ -1,6 +1,12 @@
 /* Types mirror company_dashboard.api.wc.* exactly. All five endpoints are served from
  * one snapshot (same refreshed_at / as_of). Day ratios are null when not meaningful. */
 
+/** Side-signed GL balance of one control account (receivable: debit +, payable: credit +). */
+export interface AccountBalance {
+	account: string;
+	amount: number;
+}
+
 interface WcEnvelope {
 	company: string;
 	as_of: string;
@@ -117,6 +123,8 @@ export interface TradeReceivable extends WcEnvelope {
 	advances: number;
 	internal_accounts_total: number;
 	excluded_parties_total: number;
+	/** Σ amount = total + excluded_parties_total. */
+	account_balances: AccountBalance[];
 	aging: AgingData;
 	top_debtors: PartyRow[];
 	dso: number | null;
@@ -136,6 +144,8 @@ export interface TradePayable extends WcEnvelope {
 	advance_paid: number;
 	internal_accounts_total: number;
 	excluded_parties_total: number;
+	/** Σ amount = total + excluded_parties_total. */
+	account_balances: AccountBalance[];
 	aging: AgingData;
 	top_creditors: PartyRow[];
 	dpo: number | null;
@@ -174,6 +184,8 @@ export interface StockDetail extends WcEnvelope {
 	/** GL Stock In Hand. */
 	stock_in_hand: number;
 	stock_accounts: string[];
+	/** Σ amount = stock_in_hand. */
+	stock_account_balances: AccountBalance[];
 	bin_total: number;
 	bin_vs_gl_gap: number;
 	negative_bins: { count: number; value: number };

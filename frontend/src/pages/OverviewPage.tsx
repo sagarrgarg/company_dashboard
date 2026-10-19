@@ -10,6 +10,11 @@ import { DownloadButtons } from "@/components/widgets/DownloadButtons";
 import { PreparedReportHeader } from "@/components/widgets/PreparedReportHeader";
 import { DataQualityBanner } from "@/components/widgets/DataQualityBanner";
 import { ErrorCard } from "@/components/widgets/ErrorCard";
+import { LadderFootnote } from "@/components/widgets/LadderFootnote";
+import { Explain } from "@/components/explain/Explain";
+import { StatementsStrip } from "@/components/statements/StatementBits";
+import { useExplainCtx } from "@/hooks/useExplainCtx";
+import { explainComposite, explainStep, type ExplainContent, type ExplainCtx } from "@/lib/explain";
 import { useOverview } from "@/hooks/useOverview";
 import { useComingSoon } from "@/hooks/useUiFlags";
 import { stepsLookImpossible } from "@/lib/pnl";
@@ -29,7 +34,7 @@ import {
 } from "@/lib/utils";
 import type { ComingSoonTiles } from "@/lib/boot";
 import type { MisPageProps } from "@/App";
-import type { OverviewResponse, PnlBucket } from "@/types/mis";
+import type { OverviewResponse, PnlBucket, PnlStepKey } from "@/types/mis";
 
 /** Accent for a margin tile: impossible / n/a values never look green. */
 function marginAccent(pct: number | null, good: number): KpiAccent {
@@ -99,7 +104,7 @@ export function OverviewPage({ query, onTaxModeChange, onPeriodChange, onLoaded,
 		);
 	}
 
-	return <OverviewBody res={res} controls={controls} onRefreshed={onRefreshed} comingSoon={comingSoon} />;
+	return <OverviewBody res={res} controls={controls} onRefreshed={onRefreshed} comingSoon={comingSoon} refreshKey={query.refreshKey} />;
 }
 
 function OverviewBody({
@@ -107,13 +112,15 @@ function OverviewBody({
 	controls,
 	onRefreshed,
 	comingSoon,
+	refreshKey,
 }: {
 	res: OverviewResponse;
 	controls: React.ReactNode;
 	onRefreshed: () => void;
 	comingSoon: ComingSoonTiles;
+	refreshKey: number;
 }) {
-	const { kpi, monthly, categories, period, ladder_inputs: li, cm2_inputs: c2, cm3_inputs: c3 } = res;
+	const { kpi, monthly, categories, period, ladder_inputs: li, cm2_inputs: c2 } = res;
 	const priorOk = period.prior.available && kpi.prior_available !== false;
 	const totalDelta = growthDelta(kpi.total_revenue, kpi.total_revenue_prior, priorOk);
 	const b2cDelta = growthDelta(kpi.b2c_revenue, kpi.b2c_revenue_prior, priorOk);
@@ -139,6 +146,34 @@ function OverviewBody({
 
 	const deltaText = (d: Delta) => (d.unavailable ? PRIOR_INCOMPLETE : `${d.label} ${cmp}`);
 
+	// Every ladder number explains itself (A3) — content comes from the payload, no fetch.
+	const ctx = useExplainCtx(period, res.company, "overall");
+	const ex = (key: PnlStepKey, bucket: PnlBucket = "overall", opts?: Parameters<typeof explainStep>[2]) => {
+		const step = res.pnl?.[bucket]?.find((s) => s.key === key);
+		if (!step) return undefined;
+		return explainStep(step, bucket === "overall" ? ctx : { ...ctx, bucket }, opts);
+	};
+	const revNote =
+		res.basis?.revenue === "incl"
+			? ["The tile shows tax-inclusive revenue; the ladder and these accounts are ex-tax."]
+			: undefined;
+	const revEx = (bucket: PnlBucket, shown: number) =>
+		ex("revenue", bucket, { notes: revNote, valueSub: res.basis?.revenue === "incl" ? `ex-tax · tile ${formatINR(shown)} incl. tax` : undefined });
+	const patEx = ex("pat", "overall", {
+		notes: [
+			`PAT ${formatINR(kpi.pat)} vs GL net profit ${formatINR(li.gl_net_profit)} ${Math.abs(kpi.pat - li.gl_net_profit) <= 1 ? "✓ ties" : "⚠ differs"}.`,
+		],
+	});
+	const opexSteps = (["salary", "rent", "utility", "admin"] as PnlStepKey[])
+		.map((k) => res.pnl?.overall?.find((s) => s.key === k))
+		.filter((s): s is NonNullable<typeof s> => Boolean(s));
+	const opexEx = explainComposite("Operating opex", opexSteps, ctx, {
+		expected: li.operating_total,
+		valueSub: "salary + rent + utilities + admin",
+	});
+	const growthEx = (label: string, bucket: PnlBucket, cur: number, prior: number, d: Delta) =>
+		growthExplain(label, bucket, cur, prior, d, ctx, period.comparison_label, revBasis);
+
 	return (
 		<>
 			<PreparedReportHeader
@@ -147,8 +182,8 @@ function OverviewBody({
 				section="mis"
 				onRefreshed={onRefreshed}
 			/>
-			<header className="flex justify-between items-start mb-7 gap-4">
-				<div>
+			<header className="flex flex-col lg:flex-row lg:justify-between lg:items-start mb-7 gap-4">
+				<div className="min-w-0">
 					<div className="text-[10px] font-semibold tracking-[0.16em] uppercase text-green mb-1">
 						MIS Overview · {revBasisLong} · margins ex-tax
 					</div>
@@ -158,18 +193,27 @@ function OverviewBody({
 						{!cs.active_skus && <> · {formatNumber(kpi.active_skus)} live SKUs</>}
 					</div>
 					<div className="flex gap-1.5 mt-3 flex-wrap">
-						<span className="badge bg-green-bg text-green" title={b2cDelta.unavailable ? PRIOR_INCOMPLETE : cmp}>
-							B2C {b2cDelta.unavailable ? "growth n/a" : `${b2cDelta.label} ${cmp}`}
-						</span>
-						<span className="badge bg-amber-bg text-amber" title={b2bDelta.unavailable ? PRIOR_INCOMPLETE : cmp}>
-							B2B {b2bDelta.unavailable ? "growth n/a" : `${b2bDelta.label} ${cmp}`}
-						</span>
-						<span className="badge bg-teal-bg text-teal" title={marginTitle(kpi.cm1_pct)}>
-							CM1 · GM {formatMargin(kpi.cm1_pct)}
-						</span>
-						<span className="badge bg-purple-bg text-purple" title={marginTitle(kpi.cm2_pct)}>
-							CM2 {formatMargin(kpi.cm2_pct)}
-						</span>
+						<ChipExplain content={growthEx("B2C", "b2c", kpi.b2c_revenue, kpi.b2c_revenue_prior, b2cDelta)}>
+							<span className="badge bg-green-bg text-green">
+								B2C {b2cDelta.unavailable ? "growth n/a" : `${b2cDelta.label} ${cmp}`}
+							</span>
+						</ChipExplain>
+						<ChipExplain content={growthEx("B2B", "b2b", kpi.b2b_revenue, kpi.b2b_revenue_prior, b2bDelta)}>
+							<span className="badge bg-amber-bg text-amber">
+								B2B {b2bDelta.unavailable ? "growth n/a" : `${b2bDelta.label} ${cmp}`}
+							</span>
+						</ChipExplain>
+						<ChipExplain content={ex("cm1")}>
+							<span className="badge bg-teal-bg text-teal" title={marginTitle(kpi.cm1_pct)}>
+								CM1 · GM {formatMargin(kpi.cm1_pct)}
+							</span>
+						</ChipExplain>
+						<ChipExplain content={ex("cm2")}>
+							<span className="badge bg-purple-bg text-purple" title={marginTitle(kpi.cm2_pct)}>
+								CM2 {formatMargin(kpi.cm2_pct)}
+							</span>
+						</ChipExplain>
+						<ChipExplain content={ex("cm3")}>
 						<span
 							className={cn(
 								"badge",
@@ -183,7 +227,9 @@ function OverviewBody({
 						>
 							CM3 {formatMargin(kpi.cm3_pct)}
 						</span>
+						</ChipExplain>
 						{!cs.pat && (
+							<ChipExplain content={patEx}>
 							<span
 								className={cn(
 									"badge font-semibold",
@@ -197,17 +243,20 @@ function OverviewBody({
 							>
 								PAT {formatMargin(kpi.pat_pct)}
 							</span>
+							</ChipExplain>
 						)}
 					</div>
 				</div>
-				<div className="flex flex-col items-end gap-2.5">
+				<div className="flex flex-col items-start lg:items-end gap-2.5">
 					{controls}
-					<div className="text-right">
+					<div className="lg:text-right">
 						<div className="text-[10px] font-semibold tracking-[0.12em] uppercase text-text-3">
 							Total Revenue · {revBasis}
 						</div>
-						<div className="text-[34px] font-semibold text-text leading-[1.05] tracking-tight tabular-nums">
-							{formatINR(kpi.total_revenue)}
+						<div className="text-[28px] md:text-[34px] font-semibold text-text leading-[1.05] tracking-tight tabular-nums">
+							<ChipExplain content={revEx("overall", kpi.total_revenue)} underline>
+								{formatINR(kpi.total_revenue)}
+							</ChipExplain>
 						</div>
 						<div
 							className={cn(
@@ -230,14 +279,17 @@ function OverviewBody({
 				</div>
 			</header>
 
+			<StatementsStrip refreshKey={refreshKey} />
+
 			<DataQualityBanner dq={res.data_quality} impossibleMargins={impossible} costOverRevenue={costOver} />
 
 			<div className="sec-label">Revenue — {inPeriod} · {revBasis}</div>
-			<div className="grid grid-cols-5 gap-2.5 mb-2.5">
+			<div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2.5 mb-2.5">
 				<KpiTile
 					label="Total Revenue"
 					basis={revBasis}
 					value={formatINR(kpi.total_revenue)}
+					explain={revEx("overall", kpi.total_revenue)}
 					delta={totalDelta}
 					meta={totalDelta.unavailable ? undefined : cmp}
 				/>
@@ -245,6 +297,7 @@ function OverviewBody({
 					label="B2C Revenue"
 					basis={revBasis}
 					value={formatINR(kpi.b2c_revenue)}
+					explain={revEx("b2c", kpi.b2c_revenue)}
 					accent="green"
 					delta={b2cDelta}
 					meta={mix.b2c == null ? undefined : `${mix.b2c}% mix`}
@@ -253,6 +306,7 @@ function OverviewBody({
 					label="B2B Revenue"
 					basis={revBasis}
 					value={formatINR(kpi.b2b_revenue)}
+					explain={revEx("b2b", kpi.b2b_revenue)}
 					accent="amber"
 					delta={b2bDelta}
 					meta={mix.b2b == null ? undefined : `${mix.b2b}% mix`}
@@ -261,6 +315,7 @@ function OverviewBody({
 					label="Unclassified Rev"
 					basis={revBasis}
 					value={formatINR(kpi.unclassified_revenue)}
+					explain={revEx("unclassified", kpi.unclassified_revenue)}
 					accent={uncShareAbs > 0.2 ? "amber" : "default"}
 					delta={uncDelta}
 					meta={mix.unclassified == null ? undefined : `${mix.unclassified}% mix · no sales intent`}
@@ -276,12 +331,13 @@ function OverviewBody({
 			</div>
 
 			<div className="sec-label mt-5">Profit ladder — {inPeriod} · ex-tax</div>
-			<div className="grid grid-cols-5 gap-2.5">
+			<div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2.5">
 				<KpiTile
 					label="CM1 · Gross Margin"
 					basis="ex-tax"
 					value={formatMargin(kpi.cm1_pct)}
 					valueTitle={marginTitle(kpi.cm1_pct)}
+					explain={ex("cm1")}
 					accent={marginAccent(kpi.cm1_pct, 2)}
 					meta={`Rev − cost of goods − direct · ${formatNumber(kpi.gross_margin_coverage_pct)}% valuated`}
 				/>
@@ -290,6 +346,7 @@ function OverviewBody({
 					basis="ex-tax"
 					value={formatMargin(kpi.cm2_pct)}
 					valueTitle={marginTitle(kpi.cm2_pct)}
+					explain={ex("cm2")}
 					accent={marginAccent(kpi.cm2_pct, 2)}
 					meta={`CM1 − ${formatINR(kpi.cm2_deduction)} variable`}
 				/>
@@ -298,6 +355,7 @@ function OverviewBody({
 					basis="ex-tax"
 					value={formatMargin(kpi.cm3_pct)}
 					valueTitle={marginTitle(kpi.cm3_pct)}
+					explain={ex("cm3")}
 					accent={marginAccent(kpi.cm3_pct, 2)}
 					meta={`CM2 − ${formatINR(kpi.cm3_deduction)} marketing`}
 				/>
@@ -306,6 +364,7 @@ function OverviewBody({
 					basis="ex-tax"
 					value={formatMargin(kpi.ebitda_pct)}
 					valueTitle={marginTitle(kpi.ebitda_pct)}
+					explain={ex("ebitda")}
 					accent={marginAccent(kpi.ebitda_pct, 5)}
 					meta={
 						cs.operating_opex
@@ -319,18 +378,20 @@ function OverviewBody({
 					basis="ex-tax"
 					value={formatMargin(kpi.ebit_pct)}
 					valueTitle={marginTitle(kpi.ebit_pct)}
+					explain={ex("ebit")}
 					accent={marginAccent(kpi.ebit_pct, 5)}
 					meta={li.da_total > 0 ? `EBITDA − ${formatINR(li.da_total)} D&A` : `no D&A booked in ${inPeriod}`}
 					comingSoon={cs.ebit}
 				/>
 			</div>
 
-			<div className="mt-2.5 grid grid-cols-5 gap-2.5">
+			<div className="mt-2.5 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2.5">
 				<KpiTile
 					label="PAT"
 					basis="ex-tax"
 					value={formatMargin(kpi.pat_pct)}
 					valueTitle={marginTitle(kpi.pat_pct)}
+					explain={patEx}
 					accent={marginState(kpi.pat_pct) !== "ok" ? "amber" : (kpi.pat_pct ?? 0) > 0 ? "green" : "red"}
 					meta={`${formatINR(kpi.pat)} · − ${amt("interest_finance", li.interest_total)} int · ${amt("income_tax", li.tax_total)} tax`}
 					comingSoon={cs.pat}
@@ -339,6 +400,7 @@ function OverviewBody({
 					label="Gross Profit"
 					basis="ex-tax"
 					value={formatINR(kpi.gross_profit)}
+					explain={ex("cm1", "overall", { title: "Gross profit (CM1 in ₹)" })}
 					accent={kpi.gross_profit > 0 ? "green" : "red"}
 					meta={`CM1 in ₹ · ${inPeriod}`}
 					comingSoon={cs.gross_profit}
@@ -347,6 +409,7 @@ function OverviewBody({
 					label="Operating Opex"
 					basis="ex-tax"
 					value={formatINR(li.operating_total)}
+					explain={opexEx}
 					meta={`sal ${formatINR(li.salary_total)} · rent ${formatINR(li.rent_total)}`}
 					comingSoon={cs.operating_opex}
 				/>
@@ -354,6 +417,7 @@ function OverviewBody({
 					label="Interest & Finance"
 					basis="ex-tax"
 					value={formatINR(li.interest_total)}
+					explain={ex("interest", "overall", { value: formatINR(li.interest_total) })}
 					accent={li.interest_total > 0 ? "amber" : "default"}
 					meta={`${li.interest_accounts.length} account${li.interest_accounts.length === 1 ? "" : "s"}`}
 					comingSoon={cs.interest_finance}
@@ -362,6 +426,7 @@ function OverviewBody({
 					label="Income Tax"
 					basis="ex-tax"
 					value={formatINR(li.tax_total)}
+					explain={ex("tax", "overall", { value: formatINR(li.tax_total) })}
 					meta={
 						li.tax_total !== 0
 							? `${li.tax_accounts.length} account${li.tax_accounts.length === 1 ? "" : "s"}`
@@ -377,24 +442,28 @@ function OverviewBody({
 					rows={[
 						{
 							label: "Overall",
+							explain: ex("cm1", "overall", { title: "Overall gross margin (CM1)" }),
 							gpPct: kpi.gross_margin_pct,
 							gp: kpi.gross_profit,
 							coverage: kpi.gross_margin_coverage_pct,
 						},
 						{
 							label: "B2C",
+							explain: ex("cm1", "b2c", { title: "B2C gross margin (CM1)" }),
 							gpPct: kpi.b2c_gross_margin_pct,
 							gp: kpi.b2c_gross_profit,
 							coverage: kpi.b2c_gross_margin_coverage_pct,
 						},
 						{
 							label: "B2B",
+							explain: ex("cm1", "b2b", { title: "B2B gross margin (CM1)" }),
 							gpPct: kpi.b2b_gross_margin_pct,
 							gp: kpi.b2b_gross_profit,
 							coverage: kpi.b2b_gross_margin_coverage_pct,
 						},
 						{
 							label: "Unclassified",
+							explain: ex("cm1", "unclassified", { title: "Unclassified gross margin (CM1)" }),
 							gpPct: kpi.unclassified_gross_margin_pct,
 							gp: kpi.unclassified_gross_profit,
 							coverage: kpi.unclassified_gross_margin_coverage_pct,
@@ -404,41 +473,14 @@ function OverviewBody({
 				/>
 			</div>
 
-			<div className="mt-3 text-[10.5px] text-text-3 leading-[1.7]">
+			<LadderFootnote steps={res.pnl?.overall ?? []} ctx={ctx} flags={cs} glNetProfit={li.gl_net_profit} />
+			<div className="mt-1 text-[10.5px] text-text-3 leading-[1.7]">
 				<div>
-					<span className="font-semibold text-text-2">CM1 (GM):</span> ex-tax revenue − cost of goods{" "}
-					{formatINR(li.cogs_total)} (GL: {li.cogs_accounts.map((a) => a.account).join(", ") || "no accounts"}) −
-					direct costs {formatINR(li.direct_total)} · splits use each line's stock-ledger cost (
-					{formatINR(li.cogs_allocated)}); the GL − stock-ledger difference of{" "}
-					{formatINR(li.cogs_unallocated)} is unallocated cost of goods — shared by revenue across B2C /
-					B2B / unclassified here, shown as its own line on the SKU and segment pages
-				</div>
-				<div>
-					<span className="font-semibold text-text-2">CM2:</span> freight {formatINR(c2.freight_total)} ·{" "}
-					{c2.freight_accounts.length} acc · packaging {formatINR(c2.packaging_total)} ·{" "}
-					{c2.packaging_accounts.length} acc · txn fees {formatINR(c2.commission_total)} ·{" "}
-					{c2.commission_accounts.length} acc · schemes {formatINR(c2.scheme_total)} ·{" "}
-					{c2.scheme_accounts.length} acc
-				</div>
-				<div>
-					<span className="font-semibold text-text-2">CM3:</span> marketing {formatINR(c3.marketing_total)} ·{" "}
-					{c3.marketing_accounts.length} acc
-				</div>
-				<div>
-					<span className="font-semibold text-text-2">EBITDA:</span> salary{" "}
-					{amt("operating_opex", li.salary_total)} · {li.salary_accounts.length} acc · rent{" "}
-					{amt("operating_opex", li.rent_total)} · {li.rent_accounts.length} acc · utilities{" "}
-					{amt("operating_opex", li.utility_total)} · {li.utility_accounts.length} acc · admin{" "}
-					{amt("operating_opex", li.admin_total)} · {li.admin_accounts.length} acc · other expenses less
-					other income {formatINR(li.other_net_total)} ({li.unmapped_expense_accounts.length} unmapped
-					expense, {li.other_income_accounts.length} income acc) · internal transfers (net){" "}
-					{formatINR(li.internal_total)} · {(li.internal_accounts ?? []).length} acc
-				</div>
-				<div>
-					<span className="font-semibold text-text-2">EBIT/PAT:</span> D&A {formatINR(li.da_total)} ·{" "}
-					{li.da_accounts.length} acc · interest {amt("interest_finance", li.interest_total)} ·{" "}
-					{li.interest_accounts.length} acc · tax {amt("income_tax", li.tax_total)} · {li.tax_accounts.length}{" "}
-					acc{!cs.pat && <> · PAT ties to GL net profit {formatINR(li.gl_net_profit)}</>}
+					<span className="font-semibold text-text-2">Cost of goods split:</span> B2C / B2B / unclassified use
+					each line's stock-ledger cost ({formatINR(li.cogs_allocated)}); the GL − stock-ledger difference of{" "}
+					{formatINR(li.cogs_unallocated)} is unallocated cost of goods — shared by revenue across the buckets
+					here, shown as its own line on the SKU and segment pages. Hover or tap any underlined figure for the
+					ledgers behind it.
 				</div>
 				<div>
 					<span className="font-semibold text-text-2">Basis:</span> {c2.allocation_basis} · scope{" "}
@@ -468,7 +510,7 @@ function OverviewBody({
 				</div>
 			)}
 
-			<div className="grid grid-cols-[1.6fr_1fr] gap-4 mt-4">
+			<div className="grid grid-cols-1 xl:grid-cols-[1.6fr_1fr] gap-4 mt-4">
 				<div className="card">
 					<div className="flex items-center justify-between mb-4">
 						<div>
@@ -533,4 +575,52 @@ function EmptyState({ message }: { message: string }) {
 	return (
 		<div className="h-[140px] flex items-center justify-center text-[12px] text-text-3">{message}</div>
 	);
+}
+
+/** Explain wrapper for chips / inline figures; renders the child as-is when there's no content. */
+function ChipExplain({
+	content,
+	children,
+	underline = false,
+}: {
+	content: ExplainContent | undefined;
+	children: React.ReactNode;
+	underline?: boolean;
+}) {
+	if (!content) return <>{children}</>;
+	return (
+		<Explain content={content} underline={underline}>
+			{children}
+		</Explain>
+	);
+}
+
+function growthExplain(
+	label: string,
+	bucket: PnlBucket,
+	cur: number,
+	prior: number,
+	d: Delta,
+	ctx: ExplainCtx,
+	comparison: string,
+	basis: string,
+): ExplainContent {
+	return {
+		title: `${label} revenue growth`,
+		context: ctx.periodLabel,
+		value: d.unavailable ? "n/a" : d.label,
+		valueSub: d.unavailable ? PRIOR_INCOMPLETE : comparison,
+		formula: "(this period − same dates last year) ÷ |same dates last year|",
+		formulaLive: prior ? `(${formatINR(cur)} − ${formatINR(prior)}) ÷ ${formatINR(Math.abs(prior))}` : undefined,
+		componentsTitle: `Revenue · ${basis}`,
+		components: [
+			{ label: "This period", amount: cur },
+			{ label: "Same dates last year", amount: prior },
+		],
+		notes: d.unavailable ? ["The prior window isn't fully covered by data, so growth isn't comparable."] : undefined,
+		links: [
+			{ label: "Open breakdown", href: ctx.buildHref("/mis/line/revenue", { bucket }) },
+			{ label: "Invoices", href: ctx.buildHref("/mis/revenue", { bucket }) },
+		],
+	};
 }

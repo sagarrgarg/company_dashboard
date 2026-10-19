@@ -277,3 +277,37 @@ export function formatDays(v: number | null | undefined, allowNegative = false):
 	const r = Math.round(v);
 	return `${r < 0 ? MINUS : ""}${Math.abs(r)} days`;
 }
+
+/* ── Statements: one unit per page ──────────────────────────────────────── */
+
+export type StatementUnit = "lakh" | "crore";
+
+const UNIT_DIVISOR: Record<StatementUnit, number> = { lakh: 1_00_000, crore: 1_00_00_000 };
+export const UNIT_LABEL: Record<StatementUnit, string> = { lakh: "₹ lakh", crore: "₹ crore" };
+
+/** Statement cell in the page's unit: 4,703.69 (₹ lakh), "−0.09"; "—" for null / NaN.
+ *  Explanations keep formatINR (exact rupees in lakh / crore). */
+export function formatUnit(value: number | null | undefined, unit: StatementUnit = "lakh", digits = 2): string {
+	if (!isNum(value)) return "—";
+	return formatNumber(value / UNIT_DIVISOR[unit], digits);
+}
+
+/** Nil in a statement: below half a paisa of the unit's last digit. */
+export function isNil(value: number | null | undefined): boolean {
+	return !isNum(value) || Math.abs(value) < 0.5;
+}
+
+/** Today (browser local) as YYYY-MM-DD. */
+export function todayIso(): string {
+	const d = new Date();
+	const p = (n: number) => String(n).padStart(2, "0");
+	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** Headline figure in the page's unit: "₹1,747.51 L", "−₹9.56 L". */
+export function formatUnitINR(value: number | null | undefined, unit: StatementUnit = "lakh"): string {
+	if (!isNum(value)) return "—";
+	const body = formatUnit(Math.abs(value), unit);
+	const neg = value < 0 && body !== formatUnit(0, unit);
+	return `${neg ? MINUS : ""}₹${body} ${unit === "lakh" ? "L" : "Cr"}`;
+}

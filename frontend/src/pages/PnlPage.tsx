@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { PeriodPicker } from "@/components/widgets/PeriodPicker";
 import { DownloadButtons } from "@/components/widgets/DownloadButtons";
 import { PnlTable } from "@/components/widgets/PnlTable";
@@ -9,7 +9,11 @@ import { ErrorCard } from "@/components/widgets/ErrorCard";
 import { MarginValue, SoonValue } from "@/components/widgets/MarginValue";
 import { useOverview } from "@/hooks/useOverview";
 import { useComingSoon } from "@/hooks/useUiFlags";
-import { bucketHidden, buildPnlSteps, stepsLookImpossible, type PnlBucket } from "@/lib/pnl";
+import { BUCKETS as BUCKET_KEYS, bucketHidden, buildPnlSteps, stepsLookImpossible, type PnlBucket } from "@/lib/pnl";
+import { useUrlParam } from "@/lib/urlState";
+import { useExplainCtx } from "@/hooks/useExplainCtx";
+import { Explain } from "@/components/explain/Explain";
+import { explainStep, type ExplainCtx } from "@/lib/explain";
 import { cn, costExceedsRevenue, formatINR } from "@/lib/utils";
 import type { MisPageProps } from "@/App";
 import type { OverviewResponse } from "@/types/mis";
@@ -22,7 +26,8 @@ const BUCKETS: Array<{ key: PnlBucket; label: string }> = [
 ];
 
 export function PnlPage({ query, onPeriodChange, onLoaded, onRefreshed }: MisPageProps) {
-	const [bucket, setBucket] = useState<PnlBucket>("overall");
+	// Bucket lives in the URL (?bucket=b2c) so a shared link / new tab keeps it.
+	const [bucket, setBucket] = useUrlParam<PnlBucket>("bucket", "overall", BUCKET_KEYS);
 	const { data, error, isLoading } = useOverview(query);
 	const res = data?.message;
 	const flags = useComingSoon();
@@ -32,6 +37,7 @@ export function PnlPage({ query, onPeriodChange, onLoaded, onRefreshed }: MisPag
 	}, [res, onLoaded]);
 
 	const activeBucket: PnlBucket = bucketHidden(bucket, flags) ? "overall" : bucket;
+	const ctx = useExplainCtx(res?.period, res?.company, activeBucket);
 
 	const shell = (children: React.ReactNode, r?: OverviewResponse) => (
 		<Shell
@@ -102,9 +108,9 @@ export function PnlPage({ query, onPeriodChange, onLoaded, onRefreshed }: MisPag
 				})}
 			</div>
 
-			<BucketSplit res={res} />
+			<BucketSplit res={res} ctx={ctx} />
 
-			<div className="grid grid-cols-[1.4fr_1fr] gap-4">
+			<div className="grid grid-cols-1 xl:grid-cols-[1.4fr_1fr] gap-4">
 				<div className="card">
 					<div className="flex items-center justify-between mb-3">
 						<div>
@@ -114,9 +120,15 @@ export function PnlPage({ query, onPeriodChange, onLoaded, onRefreshed }: MisPag
 							</div>
 						</div>
 					</div>
-					<PnlWaterfallChart steps={steps} />
+					<PnlWaterfallChart
+						steps={steps}
+						explainFor={(key) => {
+							const st = res.pnl?.[activeBucket]?.find((x) => x.key === key);
+							return st ? explainStep(st, ctx) : undefined;
+						}}
+					/>
 				</div>
-				<PnlTable steps={steps} />
+				<PnlTable steps={steps} ctx={ctx} />
 			</div>
 
 			<div className="mt-3 text-[10.5px] text-text-3 leading-[1.7]">
@@ -135,7 +147,8 @@ export function PnlPage({ query, onPeriodChange, onLoaded, onRefreshed }: MisPag
 					)}
 				<div>
 					B2C / B2B / unclassified lines below cost of goods are shared by ex-tax revenue (
-					{res.cm2_inputs.allocation_basis}). Hover a line for the accounts behind it.
+					{res.cm2_inputs.allocation_basis}). Hover (or tap) any amount or bar for the ledgers behind it; click a
+					line name to open its breakdown in a new tab.
 				</div>
 			</div>
 		</>,
@@ -144,7 +157,7 @@ export function PnlPage({ query, onPeriodChange, onLoaded, onRefreshed }: MisPag
 }
 
 /** B2C + B2B + Unclassified = Total, for revenue and PAT (F5). */
-function BucketSplit({ res }: { res: OverviewResponse }) {
+function BucketSplit({ res, ctx }: { res: OverviewResponse; ctx: ExplainCtx }) {
 	const flags = useComingSoon();
 	const cols: Array<{ key: PnlBucket; label: string }> = [
 		{ key: "b2c", label: "B2C" },
@@ -159,8 +172,8 @@ function BucketSplit({ res }: { res: OverviewResponse }) {
 		{ key: "pat", label: "PAT", hidden: flags.pat, amountHidden: false },
 	];
 	return (
-		<div className="card !p-0 overflow-hidden mb-4">
-			<table className="w-full text-[12px] tabular-nums">
+		<div className="card !p-0 overflow-x-auto mb-4">
+			<table className="w-full text-[12px] tabular-nums min-w-[520px]">
 				<thead>
 					<tr>
 						<th className="px-5 py-2 text-left text-[10px] font-semibold tracking-[0.08em] uppercase text-text-3 border-b border-border">
@@ -196,7 +209,17 @@ function BucketSplit({ res }: { res: OverviewResponse }) {
 											<SoonValue />
 										) : (
 											<>
-												<div>{r.amountHidden ? <SoonValue /> : formatINR(step?.subtotal)}</div>
+												<div>
+													{r.amountHidden ? (
+														<SoonValue />
+													) : step ? (
+														<Explain content={() => explainStep(step, { ...ctx, bucket: c.key })}>
+															{formatINR(step.subtotal)}
+														</Explain>
+													) : (
+														formatINR(undefined)
+													)}
+												</div>
 												{r.key !== "revenue" && (
 													<div className="text-[10px] text-text-3">
 														<MarginValue pct={step?.pct ?? null} />
@@ -233,6 +256,7 @@ function Shell({
 	const flags = useComingSoon();
 	const steps = res?.pnl?.[bucket] ?? [];
 	const pat = steps.find((s) => s.key === "pat");
+	const ctx = useExplainCtx(res?.period, res?.company, bucket);
 	return (
 		<>
 			{res && (
@@ -243,8 +267,8 @@ function Shell({
 					onRefreshed={onRefreshed}
 				/>
 			)}
-			<header className="flex justify-between items-start mb-7 gap-4">
-				<div>
+			<header className="flex flex-col lg:flex-row lg:justify-between lg:items-start mb-7 gap-4">
+				<div className="min-w-0">
 					<div className="text-[10px] font-semibold tracking-[0.16em] uppercase text-green mb-1">
 						P&amp;L Waterfall · ex-tax
 					</div>
@@ -258,8 +282,8 @@ function Shell({
 						</div>
 					)}
 				</div>
-				<div className="flex flex-col items-end gap-2.5">
-					<div className="flex items-center gap-2 flex-wrap justify-end">
+				<div className="flex flex-col items-start lg:items-end gap-2.5">
+					<div className="flex items-center gap-2 flex-wrap lg:justify-end">
 						<DownloadButtons taxMode={query.taxMode} period={query.period} company={query.company} />
 						<PeriodPicker value={query.period} onChange={onPeriodChange} company={query.company} />
 						<span
@@ -284,7 +308,7 @@ function Shell({
 											pat.subtotal >= 0 ? "text-text" : "text-red",
 										)}
 									>
-										{formatINR(pat.subtotal)}
+										<Explain content={() => explainStep(pat, ctx)}>{formatINR(pat.subtotal)}</Explain>
 									</div>
 									<div className="text-[12px] font-medium tabular-nums">
 										<MarginValue

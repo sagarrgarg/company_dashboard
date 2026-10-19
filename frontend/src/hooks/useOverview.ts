@@ -19,7 +19,7 @@ export interface MisQuery {
 
 const SWR_OPTS = { revalidateOnFocus: false, dedupingInterval: 60_000 };
 
-function baseParams(q: MisQuery): Record<string, string> {
+export function baseParams(q: MisQuery): Record<string, string> {
 	const params: Record<string, string> = { tax_mode: q.taxMode };
 	if (q.period.kind !== "ttm") {
 		params.from_date = q.period.from;
@@ -29,7 +29,7 @@ function baseParams(q: MisQuery): Record<string, string> {
 	return params;
 }
 
-function baseKey(q: MisQuery): string {
+export function baseKey(q: MisQuery): string {
 	return `${q.company || "-"}::${q.taxMode}::${periodKey(q.period)}::${q.refreshKey}`;
 }
 

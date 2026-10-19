@@ -135,3 +135,46 @@ class TestReconcilesToLedger(_TestCase):
 		self.assertAlmostEqual(k["borrowings"], borrowing, delta=TOLERANCE)
 		cash = sum(a["balance"] for a in snap["bank"]["accounts"] if a["kind"] in ("bank", "cash"))
 		self.assertAlmostEqual(k["cash_and_bank"], cash, delta=TOLERANCE)
+
+
+class TestStatementsTie(_TestCase):
+	"""Balance sheet, cash flow, monthly statement and controls on the site's own data."""
+
+	def setUp(self):
+		if not frappe.db.count("Company") or not mis._erpnext_installed():
+			self.skipTest("needs a company with ERPNext data")
+		self.company = mis._resolve_company()
+		start = frappe.db.sql("select min(posting_date) from `tabGL Entry` where company=%s", self.company)[
+			0
+		][0]
+		if not start:
+			self.skipTest("no GL entries")
+		self.from_date, self.to_date = start.isoformat(), frappe.utils.today()
+
+	def test_balance_sheet_balances(self):
+		from company_dashboard.api import statements
+
+		bs = statements._compute_balance_sheet(self.to_date, self.company)
+		self.assertTrue(bs["checks"]["balanced"], bs["checks"])
+		self.assertAlmostEqual(bs["checks"]["trial_balance_difference"], 0, delta=TOLERANCE)
+
+	def test_cash_flow_ties_to_cash(self):
+		from company_dashboard.api import statements
+
+		cf = statements._compute_cash_flow(self.from_date, self.to_date, self.company)
+		self.assertTrue(cf["checks"]["ties_to_balance_sheet"], cf["checks"])
+		self.assertTrue(cf["checks"]["pat_equals_gl"])
+
+	def test_monthly_statement_sums(self):
+		from company_dashboard.api import finance
+
+		st = finance._compute_pnl_statement("excl", self.from_date, self.to_date, self.company)
+		self.assertTrue(st["checks"]["months_sum_to_total"], st["checks"])
+		self.assertTrue(st["checks"]["pat_equals_gl"], st["checks"])
+
+	def test_no_failing_controls(self):
+		from company_dashboard.api import controls
+
+		c = controls._compute_controls(self.from_date, self.to_date, self.company)
+		failing = [x["label"] for x in c["checks"] if x["status"] == "fail"]
+		self.assertEqual(failing, [])

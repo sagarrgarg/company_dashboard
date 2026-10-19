@@ -9,6 +9,19 @@ import {
 import { PreparedReportHeader } from "@/components/widgets/PreparedReportHeader";
 import { ErrorCard } from "@/components/widgets/ErrorCard";
 import { formatDays, formatINR, formatNumber, formatPct, shortDate } from "@/lib/utils";
+import { Explain } from "@/components/explain/Explain";
+import { useDashState, type DashStateApi } from "@/lib/urlState";
+import {
+	accountHref,
+	deskAccountHref,
+	deskPartyHref,
+	signOf,
+	sum,
+	tieCheck,
+	type ExplainContent,
+	type ExplainRow,
+} from "@/lib/explain";
+import type { AccountBalance, BankDetail, StockDetail, TradePayable, TradeReceivable, WcOverview } from "@/types/wc";
 import type {
 	AgingBucket,
 	AgingData,
@@ -77,6 +90,7 @@ function SignedBar({
 	maxNeg,
 	posColor = "var(--green-mid)",
 	title,
+	href,
 }: {
 	label: string;
 	tag?: React.ReactNode;
@@ -85,6 +99,8 @@ function SignedBar({
 	maxNeg: number;
 	posColor?: string;
 	title?: string;
+	/** Account drill page (new tab). */
+	href?: string;
 }) {
 	const span = maxPos + maxNeg || 1;
 	const zero = (maxNeg / span) * 100;
@@ -94,7 +110,14 @@ function SignedBar({
 	return (
 		<div className="grid grid-cols-[1fr_120px_96px] items-center gap-2 mb-2" title={title}>
 			<span className="text-[12.5px] font-medium truncate flex items-center gap-1.5 min-w-0">
-				<span className="truncate">{label}</span>
+				{href ? (
+					<a href={href} target="_blank" rel="noopener" className="truncate hover:text-green hover:underline underline-offset-2">
+						{label} <span className="text-text-4" aria-hidden="true">↗</span>
+						<span className="sr-only">(opens the account in a new tab)</span>
+					</a>
+				) : (
+					<span className="truncate">{label}</span>
+				)}
 				{tag}
 			</span>
 			<div className="relative h-[7px] bg-surface-2 rounded-full border border-border">
@@ -217,12 +240,14 @@ function KpiCard({
 	color,
 	icon,
 	footer,
+	explain,
 }: {
 	label: string;
 	value: string;
 	color: string;
 	icon: string;
 	footer?: React.ReactNode;
+	explain?: ExplainContent;
 }) {
 	return (
 		<div className="kpi relative overflow-hidden">
@@ -235,7 +260,13 @@ function KpiCard({
 			</div>
 			<div className="kpi-lbl">{label}</div>
 			<div className="kpi-val" style={{ color }}>
-				{value}
+				{explain ? (
+					<Explain content={explain} label={`${label}, ${value}, has breakdown`}>
+						{value}
+					</Explain>
+				) : (
+					value
+				)}
 			</div>
 			{footer && <div className="kpi-meta mt-2 flex-wrap">{footer}</div>}
 		</div>
@@ -253,6 +284,7 @@ const KIND_LABEL: Record<BankAccountKind, string> = {
 const KIND_ORDER: BankAccountKind[] = ["bank", "cash", "gateway", "borrowing"];
 
 function BankSection({ company, refreshKey }: { company: string; refreshKey: number }) {
+	const { buildHref } = useDashState();
 	const { data, isLoading, error } = useBankDetail(company, refreshKey);
 	const d = data?.message;
 	if (error) return <ErrorCard title="Cash & bank failed to load" error={error} />;
@@ -300,6 +332,7 @@ function BankSection({ company, refreshKey }: { company: string; refreshKey: num
 							value={a.balance}
 							{...scale}
 							title={`${a.account}${a.last_posting_date ? ` · last entry ${a.last_posting_date}` : ""}`}
+							href={accountHref({ buildHref }, a.account, { via: "wc" })}
 						/>
 					))}
 					{accounts.length === 0 && <div className="text-[12px] text-text-3">No bank or cash accounts.</div>}
@@ -542,7 +575,7 @@ function ReceivableSection({ company, refreshKey }: { company: string; refreshKe
 					<div className="text-[10px] font-mono text-text-3 uppercase tracking-wider mt-0.5 mb-3">
 						Customer-wise · sorted by amount
 					</div>
-					<PartyTable rows={d.top_debtors} groupField="customer_group" />
+					<PartyTable rows={d.top_debtors} groupField="customer_group" partyType="Customer" />
 					<hr className="border-border my-3" />
 					<div className="flex justify-between items-center gap-3">
 						<span className="text-[12px] font-medium text-text-3">
@@ -614,7 +647,7 @@ function PayableSection({ company, refreshKey }: { company: string; refreshKey: 
 					<div className="text-[10px] font-mono text-text-3 uppercase tracking-wider mt-0.5 mb-3">
 						Sorted by outstanding
 					</div>
-					<PartyTable rows={d.top_creditors} groupField="supplier_group" />
+					<PartyTable rows={d.top_creditors} groupField="supplier_group" partyType="Supplier" />
 				</div>
 			</div>
 		</>
@@ -643,9 +676,11 @@ function ReconcilingNote({
 function PartyTable({
 	rows,
 	groupField,
+	partyType,
 }: {
 	rows: PartyRow[];
 	groupField: "customer_group" | "supplier_group";
+	partyType: "Customer" | "Supplier";
 }) {
 	if (!rows.length) return <div className="text-[12px] text-text-3">No data</div>;
 
@@ -674,7 +709,15 @@ function PartyTable({
 					{rows.map((r) => (
 						<tr key={r.party} className="border-b border-border hover:bg-surface-2/50">
 							<td className="py-2 px-2 font-medium truncate max-w-[180px]" title={r.party}>
-								{r.party_name || r.party}
+								<a
+									href={deskPartyHref(partyType, r.party)}
+									target="_blank"
+									rel="noopener"
+									className="hover:text-green hover:underline underline-offset-2"
+								>
+									{r.party_name || r.party} <span className="text-text-4" aria-hidden="true">↗</span>
+									<span className="sr-only">(opens the {partyType.toLowerCase()} in ERPNext in a new tab)</span>
+								</a>
 							</td>
 							<td className="py-2 px-2">
 								<Pill variant="soft" title={r[groupField] ?? undefined}>
@@ -770,6 +813,7 @@ function WarehouseTreeRow({
 }
 
 function StockSection({ company, refreshKey }: { company: string; refreshKey: number }) {
+	const { buildHref } = useDashState();
 	const { data, isLoading, error } = useStockDetail(company, refreshKey);
 	const d = data?.message;
 	const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -826,12 +870,20 @@ function StockSection({ company, refreshKey }: { company: string; refreshKey: nu
 						))}
 					</div>
 					<div className="mt-3 rounded-lg bg-surface-2/60 px-3 py-2">
-						<Line
-							label="Stock in hand (GL)"
-							note={d.stock_accounts.join(", ")}
-							value={d.stock_in_hand}
-							color="var(--purple)"
-						/>
+						<Line label="Stock in hand (GL)" value={d.stock_in_hand} color="var(--purple)" />
+						<div className="flex flex-wrap gap-x-3 gap-y-0.5 pb-1 text-[10.5px]">
+							{d.stock_accounts.map((acc) => (
+								<a
+									key={acc}
+									href={accountHref({ buildHref }, acc, { via: "wc" })}
+									target="_blank"
+									rel="noopener"
+									className="text-green hover:underline underline-offset-2"
+								>
+									{acc} ↗<span className="sr-only"> (opens the account in a new tab)</span>
+								</a>
+							))}
+						</div>
 						<Line label="Bin total (stock ledger)" value={d.bin_total} />
 						<Line
 							label="Bin vs GL gap"
@@ -962,6 +1014,13 @@ export function WorkingCapitalPage({
 	const { data, error, isLoading } = useWcOverview(company, refreshKey);
 	const ov = data?.message;
 	const k = ov?.kpi;
+	// Same snapshot as the sections below (SWR de-duplicates) — for the tiles' breakdowns.
+	const bank = useBankDetail(company, refreshKey).data?.message;
+	const stock = useStockDetail(company, refreshKey).data?.message;
+	const arDetail = useTradeReceivable(company, refreshKey).data?.message;
+	const apDetail = useTradePayable(company, refreshKey).data?.message;
+	const { buildHref } = useDashState();
+	const ex = ov ? wcExplains(ov, bank, stock, arDetail, apDetail, buildHref) : null;
 
 	useEffect(() => {
 		if (ov && onLoaded) onLoaded(ov.company);
@@ -999,6 +1058,7 @@ export function WorkingCapitalPage({
 							value={formatINR(k.trade_working_capital)}
 							color={signColor(k.trade_working_capital, "var(--blue)")}
 							icon="💼"
+							explain={ex?.tradeWc}
 							footer={<span className="text-[10px] text-text-3 font-mono">AR + stock − AP</span>}
 						/>
 						<KpiCard
@@ -1006,11 +1066,18 @@ export function WorkingCapitalPage({
 							value={formatINR(k.cash_and_bank)}
 							color={signColor(k.cash_and_bank)}
 							icon="🏦"
+							explain={ex?.cash}
 							footer={
 								<>
 									{k.borrowings !== 0 && (
 										<Pill variant="down" title="Overdraft / cash-credit drawn — a borrowing, not cash">
-											OD / CC {formatINR(k.borrowings)}
+											{ex?.od ? (
+												<Explain content={ex.od} underline>
+													OD / CC {formatINR(k.borrowings)}
+												</Explain>
+											) : (
+												<>OD / CC {formatINR(k.borrowings)}</>
+											)}
 										</Pill>
 									)}
 									{k.gateway_receivables !== 0 && (
@@ -1027,6 +1094,7 @@ export function WorkingCapitalPage({
 							value={formatINR(k.trade_receivable)}
 							color="var(--blue)"
 							icon="📥"
+							explain={ex?.ar}
 							footer={
 								<>
 									<DaysPill label="DSO" days={k.dso} variant="info" />
@@ -1039,6 +1107,7 @@ export function WorkingCapitalPage({
 							value={formatINR(k.trade_payable)}
 							color="var(--red)"
 							icon="📤"
+							explain={ex?.ap}
 							footer={
 								<>
 									<DaysPill label="DPO" days={k.dpo} variant="warn" />
@@ -1051,6 +1120,7 @@ export function WorkingCapitalPage({
 							value={formatINR(k.stock_in_hand)}
 							color="var(--purple)"
 							icon="📦"
+							explain={ex?.stock}
 							footer={<DaysPill label="DIO" days={k.dio} variant="info" />}
 						/>
 						<KpiCard
@@ -1058,6 +1128,7 @@ export function WorkingCapitalPage({
 							value={formatDays(k.ccc, true)}
 							color="var(--teal)"
 							icon="🔄"
+							explain={ex?.ccc}
 							footer={<span className="text-[10px] text-text-3 font-mono">DSO + DIO − DPO</span>}
 						/>
 					</div>
@@ -1109,4 +1180,173 @@ function WcDefinition({ label, formula, value }: { label: string; formula: strin
 			<div className="text-[10.5px] text-text-3 font-mono">{formula}</div>
 		</div>
 	);
+}
+
+/* ── Tile breakdowns ────────────────────────────────────────────────────── */
+
+function wcExplains(
+	ov: WcOverview,
+	bank: BankDetail | undefined,
+	stock: StockDetail | undefined,
+	arDetail: TradeReceivable | undefined,
+	apDetail: TradePayable | undefined,
+	buildHref: DashStateApi["buildHref"],
+): Record<"tradeWc" | "cash" | "od" | "ar" | "ap" | "stock" | "ccc", ExplainContent> {
+	const k = ov.kpi;
+	const asOf = `GL snapshot · as of ${shortDate(ov.as_of)}`;
+	const acc = (a: string) => accountHref({ buildHref }, a, { via: "wc" });
+	const bankRows = (kinds: string[]) =>
+		(bank?.accounts ?? [])
+			.filter((a) => kinds.includes(a.kind))
+			.sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance))
+			.map((a) => ({ label: a.account, amount: a.balance, href: acc(a.account), deskHref: deskAccountHref(a.account) }));
+	const cashRows = bankRows(["bank", "cash"]);
+	const odRows = bankRows(["borrowing"]);
+	const twc = [k.trade_receivable, k.stock_in_hand, -k.trade_payable];
+	const accountRows = (bals: AccountBalance[]) =>
+		[...bals]
+			.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))
+			.map((a) => ({ label: a.account, amount: a.amount, sign: signOf(a.amount), href: acc(a.account), deskHref: deskAccountHref(a.account) }));
+	/** Control accounts − the excluded internal parties' balance = the net figure on the tile. */
+	const controlSources = (
+		d: TradeReceivable | TradePayable | undefined,
+		net: number,
+		side: "debit" | "credit",
+	): Pick<ExplainContent, "sources" | "sourcesTitle" | "check"> & { note?: string } => {
+		if (!d?.account_balances) return { note: "Loading the control accounts…" };
+		const rows: ExplainRow[] = accountRows(d.account_balances);
+		const excl = -d.excluded_parties_total;
+		if (Math.abs(excl) >= 0.5)
+			rows.push({
+				label: "Excluded internal / sister-company parties",
+				amount: excl,
+				sign: signOf(excl),
+				muted: true,
+				note: "derived · their balance is taken out",
+			});
+		const total = sum(rows.map((r) => r.amount ?? 0));
+		return {
+			sourcesTitle: `Control accounts (${side} balance +) · each opens its ledger`,
+			sources: rows,
+			check: tieCheck(total, net, "control accounts − excluded parties", formatINR(net)),
+		};
+	};
+	const arSrc = controlSources(arDetail, k.trade_receivable, "debit");
+	const apSrc = controlSources(apDetail, k.trade_payable, "credit");
+	const stockRows = stock?.stock_account_balances ? accountRows(stock.stock_account_balances) : null;
+	return {
+		tradeWc: {
+			title: "Trade working capital",
+			context: asOf,
+			value: formatINR(k.trade_working_capital),
+			formula: "Trade receivable (net) + stock in hand − trade payable (net)",
+			formulaLive: `${formatINR(k.trade_receivable)} + ${formatINR(k.stock_in_hand)} − ${formatINR(k.trade_payable)} = ${formatINR(k.trade_working_capital)}`,
+			components: [
+				{ label: "Trade receivable (net)", amount: k.trade_receivable, sign: "" },
+				{ label: "Stock in hand (GL)", amount: k.stock_in_hand, sign: "+", href: stock?.stock_accounts[0] ? acc(stock.stock_accounts[0]) : undefined },
+				{ label: "Trade payable (net)", amount: k.trade_payable, sign: "−" },
+				{ label: "Trade working capital", amount: k.trade_working_capital, sign: "=", strong: true },
+			],
+			check: tieCheck(sum(twc), k.trade_working_capital, "parts", formatINR(k.trade_working_capital)),
+			notes: [`Cash & bank (${formatINR(k.cash_and_bank)}) and OD / CC (${formatINR(k.borrowings)}) are not part of trade WC.`],
+		},
+		cash: {
+			title: "Cash & bank",
+			context: asOf,
+			value: formatINR(k.cash_and_bank),
+			formula: "Σ asset-side Bank + Cash accounts (GL balance)",
+			formulaLive: bank ? `Σ ${cashRows.length} accounts = ${formatINR(sum(cashRows.map((r) => r.amount ?? 0)))}` : undefined,
+			sourcesTitle: "Accounts",
+			sources: cashRows.length ? cashRows : undefined,
+			check: bank ? tieCheck(sum(cashRows.map((r) => r.amount ?? 0)), k.cash_and_bank, "accounts", formatINR(k.cash_and_bank)) : null,
+			notes: [
+				"Overdraft / cash-credit accounts are borrowings and gateway settlements are receivables — both are shown separately, not as cash.",
+				...(bank ? [] : ["Loading the account list…"]),
+			],
+		},
+		od: {
+			title: "OD / CC drawn",
+			context: asOf,
+			value: formatINR(k.borrowings),
+			formula: "Σ Bank accounts under Liabilities (GL balance)",
+			sourcesTitle: "Accounts",
+			sources: odRows.length ? odRows : undefined,
+			check: bank ? tieCheck(sum(odRows.map((r) => r.amount ?? 0)), k.borrowings, "accounts", formatINR(k.borrowings)) : null,
+		},
+		ar: {
+			title: "Trade receivable (net)",
+			context: asOf,
+			value: formatINR(k.trade_receivable),
+			formula: "Gross receivable (customers with a debit balance) + customer advances (net-credit customers)",
+			formulaLive: `${formatINR(k.receivable_gross)} + (${formatINR(k.customer_advances)}) = ${formatINR(k.trade_receivable)}`,
+			components: [
+				{ label: "Gross receivable", amount: k.receivable_gross, sign: "" },
+				{ label: "Customer advances", amount: k.customer_advances, sign: k.customer_advances < 0 ? "−" : "+" },
+				{ label: "Net trade receivable", amount: k.trade_receivable, sign: "=", strong: true },
+			],
+			sourcesTitle: arSrc.sourcesTitle,
+			sources: arSrc.sources,
+			check: arSrc.check ?? tieCheck(k.receivable_gross + k.customer_advances, k.trade_receivable, "parts", formatINR(k.trade_receivable)),
+			notes: [
+				...(arSrc.note ? [arSrc.note] : []),
+				`Gross + advances: ${tieCheck(k.receivable_gross + k.customer_advances, k.trade_receivable, "parts", formatINR(k.trade_receivable)).text}`,
+				`Internal (sister-company) receivable accounts ${formatINR(k.internal_receivable)} are excluded (shown on the balance sheet as internal receivables).`,
+				`DSO ${formatDays(k.dso)} = net receivable ÷ net credit sales of the last 365 days (${formatINR(k.net_credit_sales_365d)}) × 365.`,
+			],
+			links: (arDetail?.account_balances ?? []).slice(0, 3).map((a) => ({ label: `Open ${a.account}`, href: acc(a.account) })),
+		},
+		ap: {
+			title: "Trade payable (net)",
+			context: asOf,
+			value: formatINR(k.trade_payable),
+			formula: "Gross payable (suppliers with a credit balance) + supplier advances (net-debit suppliers)",
+			formulaLive: `${formatINR(k.payable_gross)} + (${formatINR(k.supplier_advances)}) = ${formatINR(k.trade_payable)}`,
+			components: [
+				{ label: "Gross payable", amount: k.payable_gross, sign: "" },
+				{ label: "Supplier advances", amount: k.supplier_advances, sign: k.supplier_advances < 0 ? "−" : "+" },
+				{ label: "Net trade payable", amount: k.trade_payable, sign: "=", strong: true },
+			],
+			sourcesTitle: apSrc.sourcesTitle,
+			sources: apSrc.sources,
+			check: apSrc.check ?? tieCheck(k.payable_gross + k.supplier_advances, k.trade_payable, "parts", formatINR(k.trade_payable)),
+			notes: [
+				...(apSrc.note ? [apSrc.note] : []),
+				`Gross + advances: ${tieCheck(k.payable_gross + k.supplier_advances, k.trade_payable, "parts", formatINR(k.trade_payable)).text}`,
+				`Internal (sister-company) payable accounts ${formatINR(k.internal_payable)} are excluded (shown on the balance sheet as internal payables).`,
+				`DPO ${formatDays(k.dpo)} = net payable ÷ external purchases of the last 365 days (${formatINR(k.net_purchases_365d)}) × 365.`,
+			],
+			links: (apDetail?.account_balances ?? []).slice(0, 3).map((a) => ({ label: `Open ${a.account}`, href: acc(a.account) })),
+		},
+		stock: {
+			title: "Stock in hand (GL)",
+			context: asOf,
+			value: formatINR(k.stock_in_hand),
+			formula: "Σ GL balance of Stock accounts (bins only drive the warehouse / category breakdown)",
+			sourcesTitle: "Stock accounts · each opens its ledger",
+			sources: stockRows ?? (stock?.stock_accounts ?? []).map((a) => ({ label: a, display: "", href: acc(a), deskHref: deskAccountHref(a) })),
+			check: stockRows ? tieCheck(sum(stockRows.map((r) => r.amount)), k.stock_in_hand, "stock accounts", formatINR(k.stock_in_hand)) : null,
+			notes: stock
+				? [
+						`Bin total (stock ledger) ${formatINR(stock.bin_total)} · bin vs GL gap ${formatINR(stock.bin_vs_gl_gap)}.`,
+						`DIO ${formatDays(k.dio)} = stock ÷ cost of goods of the last 365 days (${formatINR(k.cogs_365d)}) × 365.`,
+					]
+				: ["Loading the stock accounts…"],
+			links: stock?.stock_accounts[0]
+				? [{ label: `Open ${stock.stock_accounts[0]}`, href: acc(stock.stock_accounts[0]) }]
+				: [],
+		},
+		ccc: {
+			title: "Cash conversion cycle",
+			context: asOf,
+			value: formatDays(k.ccc, true),
+			formula: "DSO + DIO − DPO",
+			formulaLive: `${formatDays(k.dso)} + ${formatDays(k.dio)} − ${formatDays(k.dpo)} = ${formatDays(k.ccc, true)}`,
+			components: [
+				{ label: "DSO · receivable days", display: formatDays(k.dso), sign: "" },
+				{ label: "DIO · inventory days", display: formatDays(k.dio), sign: "+" },
+				{ label: "DPO · payable days", display: formatDays(k.dpo), sign: "−" },
+				{ label: "Cash conversion cycle", display: formatDays(k.ccc, true), sign: "=", strong: true },
+			],
+		},
+	};
 }

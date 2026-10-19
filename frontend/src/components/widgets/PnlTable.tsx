@@ -1,11 +1,13 @@
 import { cn, formatINR, formatMargin, marginState, marginTitle } from "@/lib/utils";
 import type { PnlStep } from "@/lib/pnl";
 import { MarginValue, SoonValue } from "@/components/widgets/MarginValue";
+import { Explain } from "@/components/explain/Explain";
+import { explainStep, lineHref, type ExplainCtx } from "@/lib/explain";
 
 /** Sample.html's `.plt` treatment: sub-lines indented in grey, tier rows bolded with a
  *  shaded background, numbers right-aligned. Every line comes from the API ladder; all
  *  amounts and % are on tax-exclusive revenue. */
-export function PnlTable({ steps }: { steps: PnlStep[] }) {
+export function PnlTable({ steps, ctx }: { steps: PnlStep[]; ctx: ExplainCtx }) {
 	return (
 		<div className="card !p-0 overflow-hidden">
 			<div className="px-5 pt-4 pb-3 flex items-center justify-between border-b border-border">
@@ -16,6 +18,7 @@ export function PnlTable({ steps }: { steps: PnlStep[] }) {
 					ex-tax · ₹ · % of ex-tax revenue
 				</div>
 			</div>
+			<div className="overflow-x-auto">
 			<table className="w-full text-[12px] tabular-nums">
 				<thead>
 					<tr>
@@ -36,7 +39,6 @@ export function PnlTable({ steps }: { steps: PnlStep[] }) {
 									"border-b border-border last:border-b-0",
 									isTier && "bg-surface-2 font-semibold",
 								)}
-								title={step.accounts.length ? step.accounts.join("\n") : undefined}
 							>
 								<td
 									className={cn(
@@ -45,7 +47,19 @@ export function PnlTable({ steps }: { steps: PnlStep[] }) {
 										isTier && "text-text",
 									)}
 								>
-									{step.label}
+									{step.hidden ? (
+										step.label
+									) : (
+										<a
+											href={lineHref(ctx, step.key, ctx.bucket)}
+											target="_blank"
+											rel="noopener"
+											className="hover:text-green hover:underline underline-offset-2"
+										>
+											{step.label}
+											<span className="sr-only"> (opens breakdown in a new tab)</span>
+										</a>
+									)}
 								</td>
 								<td
 									className={cn(
@@ -54,7 +68,13 @@ export function PnlTable({ steps }: { steps: PnlStep[] }) {
 										isTier && step.subtotal < 0 && "text-red",
 									)}
 								>
-									{step.hidden || step.amountHidden ? <SoonValue /> : formatINR(value)}
+									{step.hidden || step.amountHidden ? (
+										<SoonValue />
+									) : (
+										<Explain content={() => explainStep(step, ctx)} label={`${step.label}, ${formatINR(value)}, ${formatMargin(step.pct)} of revenue, has breakdown`}>
+											{formatINR(value)}
+										</Explain>
+									)}
 								</td>
 								<td className="px-3 py-2 text-right whitespace-nowrap">
 									{step.hidden ? (
@@ -84,6 +104,7 @@ export function PnlTable({ steps }: { steps: PnlStep[] }) {
 					})}
 				</tbody>
 			</table>
+			</div>
 		</div>
 	);
 }

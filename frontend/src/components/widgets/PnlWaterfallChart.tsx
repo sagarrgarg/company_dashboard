@@ -11,6 +11,8 @@ import {
 	YAxis,
 } from "recharts";
 import type { PnlStep } from "@/lib/pnl";
+import { canHover, useExplainController, wantsSheet } from "@/components/explain/Explain";
+import type { ExplainContent } from "@/lib/explain";
 import { formatINR, formatMargin, formatPct, marginState } from "@/lib/utils";
 
 interface Row {
@@ -36,7 +38,15 @@ const AXIS = { fontSize: 10, fill: "#7A6F5D", fontWeight: 500 } as const;
 /** Tier-only ladder shown as % of ex-tax revenue (API `pct`). Tiers with an impossible
  *  margin (|pct| > 100) or a hidden ("Coming soon") value get no bar, so one bogus value
  *  can't blow up the axis. */
-export function PnlWaterfallChart({ steps }: { steps: PnlStep[] }) {
+export function PnlWaterfallChart({
+	steps,
+	explainFor,
+}: {
+	steps: PnlStep[];
+	/** Breakdown of a tier — hover previews it, click pins it, tap opens the sheet. */
+	explainFor?: (key: string) => ExplainContent | undefined;
+}) {
+	const ctl = useExplainController();
 	const rows: Row[] = steps
 		.filter((s) => s.kind === "tier")
 		.map((s) => {
@@ -86,14 +96,29 @@ export function PnlWaterfallChart({ steps }: { steps: PnlStep[] }) {
 					width={48}
 				/>
 				<ReferenceLine y={0} stroke="rgba(40,30,15,.35)" strokeWidth={1} />
-				<Tooltip cursor={{ fill: "rgba(40,30,15,.04)" }} content={<TierTooltip />} />
+				{!explainFor && <Tooltip cursor={{ fill: "rgba(40,30,15,.04)" }} content={<TierTooltip />} />}
 				<Bar dataKey="bar" radius={[4, 4, 0, 0]} isAnimationActive={false}>
-					{data.map((r) => (
-						<Cell
-							key={r.key}
-							fill={r.plot == null ? "transparent" : r.plot >= 0 ? COLORS.positive : COLORS.negative}
-						/>
-					))}
+					{data.map((r) => {
+						const content = !r.hidden && explainFor ? explainFor(r.key) : undefined;
+						const id = `waterfall:${r.key}`;
+						return (
+							<Cell
+								key={r.key}
+								fill={r.plot == null ? "transparent" : r.plot >= 0 ? COLORS.positive : COLORS.negative}
+								style={content ? { cursor: "pointer" } : undefined}
+								onMouseEnter={(e: React.MouseEvent<SVGElement>) => {
+									if (content && canHover()) ctl.hoverStart(id, e.currentTarget, content);
+								}}
+								onMouseLeave={() => content && ctl.hoverEnd(id)}
+								onClick={(e: React.MouseEvent<SVGElement>) => {
+									if (content)
+										ctl.activate(id, e.currentTarget, content, {
+											touch: wantsSheet((e.nativeEvent as PointerEvent).pointerType),
+										});
+								}}
+							/>
+						);
+					})}
 					<LabelList
 						dataKey="tag"
 						position="top"

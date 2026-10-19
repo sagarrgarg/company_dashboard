@@ -185,6 +185,26 @@ export type PnlStepKey =
 	| "tax"
 	| "pat";
 
+export type PnlBucket = "overall" | "b2c" | "b2b" | "unclassified";
+
+/** One ledger (or derived part) behind a P&L step. Deduction sources are signed as they
+ *  move the line (+ adds cost, − is a credit netting it down) and sum to −step.amount;
+ *  anchor (revenue) sources sum to step.amount. */
+export interface PnlSource {
+	/** GL account; null for a derived part (use `label`). */
+	account: string | null;
+	label?: string | null;
+	amount: number;
+	root_type?: string | null;
+}
+
+/** A tier's inputs: previous tier / revenue + the deductions in between (sum to the tier). */
+export interface PnlComponent {
+	key: PnlStepKey;
+	label: string;
+	amount: number;
+}
+
 export interface ApiPnlStep {
 	key: PnlStepKey;
 	label: string;
@@ -197,9 +217,18 @@ export interface ApiPnlStep {
 	pct: number | null;
 	note: string | null;
 	group: "variable" | "operating" | null;
+	/** How the figure is made, e.g. "CM1 − Freight − Packaging − …". */
+	formula?: string;
+	/** Ledgers behind the step (empty for tiers). */
+	sources?: PnlSource[];
+	/** Tiers only. */
+	components?: PnlComponent[];
+	/** Bucket revenue share (0–1); null for overall. */
+	share?: number | null;
+	bucket?: PnlBucket;
+	/** Cost of goods only (overall): stock-ledger cost vs unallocated GL difference. */
+	split?: { allocated: number; unallocated: number };
 }
-
-export type PnlBucket = "overall" | "b2c" | "b2b" | "unclassified";
 
 /** CM2 deductions: freight + packaging + transaction fees/commissions + schemes. */
 export interface Cm2Inputs {

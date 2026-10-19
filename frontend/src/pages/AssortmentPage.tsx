@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { Explain } from "@/components/explain/Explain";
+import { explainSku } from "@/lib/explain";
+import { useUrlParam } from "@/lib/urlState";
 import { PeriodPicker } from "@/components/widgets/PeriodPicker";
 import { TaxModeTabs } from "@/components/widgets/TaxModeTabs";
 import { DownloadButtons } from "@/components/widgets/DownloadButtons";
@@ -27,6 +30,8 @@ const INTENTS: Array<{ key: IntentFilter; label: string }> = [
 	{ key: "b2b", label: "B2B" },
 ];
 
+const INTENT_KEYS: readonly IntentFilter[] = ["all", "b2c", "b2b"] as const;
+
 const PAGE_SIZE = 50;
 /** Fallback for data_quality.rules.min_revenue_for_pct. */
 const DEFAULT_MIN_REVENUE = 1000;
@@ -48,7 +53,7 @@ type SortField =
 const FIXED_COLS = 15;
 
 export function AssortmentPage({ query, onTaxModeChange, onPeriodChange, onLoaded, onRefreshed }: MisPageProps) {
-	const [intent, setIntent] = useState<IntentFilter>("all");
+	const [intent, setIntent] = useUrlParam<IntentFilter>("intent", "all", INTENT_KEYS);
 	const [search, setSearch] = useState("");
 	const [showAll, setShowAll] = useState(false);
 	const [sortField, setSortField] = useState<SortField>("revenue");
@@ -301,7 +306,9 @@ export function AssortmentPage({ query, onTaxModeChange, onPeriodChange, onLoade
 											<Td className="text-text-2">{formatINR(r.cogs)}</Td>
 											<Td className="text-text-2">{hideGp ? <SoonValue /> : formatINR(r.gp)}</Td>
 											<Td>
-												<MarginValue pct={r.gm_pct} colorFor={(p) => pctColor(p, 5, 0)} />
+												<SkuExplain r={r} level="gm" periodLabel={res.period.label} basis={res.allocation.basis} hideGp={hideGp}>
+													<MarginValue pct={r.gm_pct} colorFor={(p) => pctColor(p, 5, 0)} />
+												</SkuExplain>
 											</Td>
 											<Td className="text-amber">{formatINR(r.alloc_freight)}</Td>
 											<Td className="text-text-3">{formatINR(r.alloc_packaging)}</Td>
@@ -309,12 +316,16 @@ export function AssortmentPage({ query, onTaxModeChange, onPeriodChange, onLoade
 											<Td className="text-text-3">{formatINR(r.alloc_scheme)}</Td>
 											<Td className="text-amber">{formatINR(r.alloc_marketing)}</Td>
 											<Td>
-												<MarginValue pct={r.cm2_pct} colorFor={(p) => pctColor(p, 3, 0)} />
+												<SkuExplain r={r} level="cm2" periodLabel={res.period.label} basis={res.allocation.basis} hideGp={hideGp}>
+													<MarginValue pct={r.cm2_pct} colorFor={(p) => pctColor(p, 3, 0)} />
+												</SkuExplain>
 											</Td>
 											<Td>
 												<div className="text-text-2">{formatINR(r.cm3)}</div>
 												<div className="text-[10px]">
-													<MarginValue pct={r.cm3_pct} colorFor={(p) => pctColor(p, 2, 0)} />
+													<SkuExplain r={r} level="cm3" periodLabel={res.period.label} basis={res.allocation.basis} hideGp={hideGp}>
+														<MarginValue pct={r.cm3_pct} colorFor={(p) => pctColor(p, 2, 0)} />
+													</SkuExplain>
 												</div>
 											</Td>
 											{res.month_keys.map((mk) => {
@@ -523,4 +534,34 @@ function pctColor(pct: number, goodAbove: number, neutralAbove: number): string 
 	if (pct > goodAbove) return "text-green font-semibold";
 	if (pct > neutralAbove) return "text-amber";
 	return "text-red font-semibold";
+}
+
+/** Small explain on a SKU margin cell (rev ex-tax, stock cost, GP, allocations). */
+function SkuExplain({
+	r,
+	level,
+	periodLabel,
+	basis,
+	hideGp,
+	children,
+}: {
+	r: SkuRow;
+	level: "gm" | "cm2" | "cm3";
+	periodLabel: string;
+	basis: string;
+	hideGp: boolean;
+	children: React.ReactNode;
+}) {
+	// Rupee GP is a "Coming soon" figure when flagged — don't reveal it in the breakdown.
+	if (hideGp) return <>{children}</>;
+	return (
+		<Explain
+			content={() =>
+				explainSku(r, level, { periodLabel, basis, itemHref: `/app/item/${encodeURIComponent(r.item_code)}` })
+			}
+			label={`${level === "gm" ? "Gross margin" : level.toUpperCase()} of ${r.item_code}, has breakdown`}
+		>
+			{children}
+		</Explain>
+	);
 }

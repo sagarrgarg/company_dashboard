@@ -103,3 +103,49 @@ export function stepsLookImpossible(steps: ApiPnlStep[]): boolean {
 			(s.key === "cogs" && costExceedsRevenue(s.amount, revenue)),
 	);
 }
+
+/* ── Static ladder map (crumbs / drill pages before data loads) ─────────── */
+
+export const LADDER: Array<{ key: PnlStepKey; label: string; kind: ApiPnlStep["kind"] }> = [
+	{ key: "revenue", label: "Revenue", kind: "anchor" },
+	{ key: "cogs", label: "Cost of goods", kind: "deduction" },
+	{ key: "direct", label: "Direct costs", kind: "deduction" },
+	{ key: "cm1", label: "CM1 · Gross margin", kind: "tier" },
+	{ key: "freight", label: "Outbound freight", kind: "deduction" },
+	{ key: "packaging", label: "Packaging & dispatch", kind: "deduction" },
+	{ key: "commission", label: "Transaction fees & commissions", kind: "deduction" },
+	{ key: "scheme", label: "Trade schemes & rebates", kind: "deduction" },
+	{ key: "cm2", label: "CM2 · Before marketing", kind: "tier" },
+	{ key: "marketing", label: "Marketing", kind: "deduction" },
+	{ key: "cm3", label: "CM3 · After marketing", kind: "tier" },
+	{ key: "salary", label: "Salary & payroll", kind: "deduction" },
+	{ key: "rent", label: "Rent & lease", kind: "deduction" },
+	{ key: "utility", label: "Utilities & communications", kind: "deduction" },
+	{ key: "admin", label: "Admin & general overhead", kind: "deduction" },
+	{ key: "other", label: "Other expenses less other income", kind: "deduction" },
+	{ key: "internal", label: "Internal transfers (net)", kind: "deduction" },
+	{ key: "ebitda", label: "EBITDA", kind: "tier" },
+	{ key: "da", label: "Depreciation & amortization", kind: "deduction" },
+	{ key: "ebit", label: "EBIT", kind: "tier" },
+	{ key: "interest", label: "Interest & finance cost", kind: "deduction" },
+	{ key: "pbt", label: "PBT · Profit before tax", kind: "tier" },
+	{ key: "tax", label: "Income tax", kind: "deduction" },
+	{ key: "pat", label: "PAT · Profit after tax", kind: "tier" },
+];
+
+export function isStepKey(k: string | null | undefined): k is PnlStepKey {
+	return !!k && LADDER.some((l) => l.key === k);
+}
+
+export function ladderLabel(key: PnlStepKey): string {
+	return LADDER.find((l) => l.key === key)?.label ?? key;
+}
+
+/** The tier a deduction rolls into (freight → CM2); a tier / revenue has none. */
+export function parentTier(key: PnlStepKey): PnlStepKey | null {
+	const i = LADDER.findIndex((l) => l.key === key);
+	if (i < 0 || LADDER[i].kind !== "deduction") return null;
+	return LADDER.slice(i + 1).find((l) => l.kind === "tier")?.key ?? null;
+}
+
+export const BUCKETS: readonly PnlBucket[] = ["overall", "b2c", "b2b", "unclassified"] as const;
