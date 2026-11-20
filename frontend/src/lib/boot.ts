@@ -39,6 +39,7 @@ interface Boot {
 	};
 	time_zone?: { system?: string; user?: string | null };
 	sysdefaults?: { time_zone?: string };
+	sitename?: string;
 }
 
 function boot(): Boot | undefined {
@@ -55,6 +56,11 @@ export function bootSections(): DashboardSections {
 
 export function bootComingSoon(): ComingSoonTiles {
 	return { ...EMPTY_COMING_SOON, ...(boot()?.company_dashboard?.coming_soon_tiles ?? {}) };
+}
+
+/** Site name — the realtime (socket.io) namespace on Frappe v15+. */
+export function bootSiteName(): string | undefined {
+	return boot()?.sitename || undefined;
 }
 
 /** System timezone of the Frappe site — server timestamps are naive in this zone. */

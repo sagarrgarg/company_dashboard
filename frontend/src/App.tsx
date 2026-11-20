@@ -18,6 +18,7 @@ import { CashFlowPage } from "@/pages/statements/CashFlowPage";
 import { RatiosPage } from "@/pages/statements/RatiosPage";
 import { ControlsPage } from "@/pages/statements/ControlsPage";
 import { AlertsPage } from "@/pages/statements/AlertsPage";
+import { SalesInvoicesPage } from "@/pages/SalesInvoicesPage";
 import { ControlsBadge, useStatementBadges } from "@/components/statements/StatementBits";
 import { ExplainProvider } from "@/components/explain/Explain";
 import {
@@ -29,7 +30,7 @@ import {
 	type DashState,
 } from "@/lib/urlState";
 import { useUiFlags } from "@/hooks/useUiFlags";
-import { bootDefaultCompany, type DashboardSections } from "@/lib/boot";
+import { bootDefaultCompany, bootSiteName, type DashboardSections } from "@/lib/boot";
 import type { MisQuery } from "@/hooks/useOverview";
 import type { PeriodSelection, TaxMode } from "@/types/mis";
 
@@ -89,7 +90,9 @@ export default function App() {
 	return (
 		// url "" → same origin. In Vite dev that is :8082, which proxies /api to bench, so
 		// the session cookie and CSRF token from get_context_for_dev both apply.
-		<FrappeProvider url="">
+		// siteName: Frappe v15's realtime server namespaces sockets by site; without it the
+		// socket can't authenticate (used by the Sales Invoices page's live updates).
+		<FrappeProvider url="" siteName={bootSiteName()}>
 			<BrowserRouter basename={BASENAME}>
 				<ExplainProvider>
 					<Dashboard />
@@ -268,6 +271,11 @@ function Dashboard() {
 					    Receivable / Payable / Stock accounts (enforced by the API). */}
 					{(sections.mis || sections.wc) && (
 						<Route path="/mis/account/:account" element={<AccountDrillPage {...misProps} />} />
+					)}
+
+					{/* Sales Invoices: open to both MIS and WC viewers. */}
+					{(sections.mis || sections.wc) && (
+						<Route path="/mis/invoices" element={<SalesInvoicesPage {...misProps} />} />
 					)}
 
 					{/* ── Working Capital section ── */}

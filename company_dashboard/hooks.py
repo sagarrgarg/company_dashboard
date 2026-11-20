@@ -162,7 +162,12 @@ doc_events = {
 	"*": {
 		"on_submit": "company_dashboard.api.report_cache.bump_data_version",
 		"on_cancel": "company_dashboard.api.report_cache.bump_data_version",
-	}
+	},
+	# Sales Invoices page: a realtime ping (no data) so open dashboards refetch.
+	"Sales Invoice": {
+		"on_submit": "company_dashboard.api.invoices.notify_invoice_change",
+		"on_cancel": "company_dashboard.api.invoices.notify_invoice_change",
+	},
 }
 
 # Scheduled Tasks

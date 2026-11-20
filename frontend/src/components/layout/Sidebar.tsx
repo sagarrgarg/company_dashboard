@@ -11,7 +11,8 @@ interface NavItem {
 	label: string;
 	icon: React.ReactNode;
 	group: string;
-	section: "mis" | "wc";
+	/** "any" = shown to MIS or WC viewers. */
+	section: "mis" | "wc" | "any";
 	disabled?: boolean;
 	/** Live count shown on the link. */
 	badge?: "controls" | "alerts";
@@ -51,6 +52,18 @@ const ITEMS: NavItem[] = [
 				strokeLinecap="round"
 				strokeLinejoin="round"
 			/>,
+		),
+	},
+	{
+		group: "Revenue",
+		section: "any",
+		to: "/mis/invoices",
+		label: "Sales Invoices",
+		icon: ICON(
+			<>
+				<path d="M3.5 1.5h9v13l-1.5-1-1.5 1-1.5-1-1.5 1-1.5-1-1.5 1z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+				<path d="M6 5h4M6 8h4M6 11h2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+			</>,
 		),
 	},
 	{
@@ -241,7 +254,7 @@ export function Sidebar({
 	const brand = company?.trim() || "Biz Dashboard";
 	const { data: companiesData } = useCompanies();
 	const companies = companiesData?.message ?? [];
-	const visible = ITEMS.filter((it) => sections[it.section]);
+	const visible = ITEMS.filter((it) => (it.section === "any" ? sections.mis || sections.wc : sections[it.section]));
 	// Controls / alerts badges: fetched lazily, server-cached, shared with their pages.
 	const { summary, counts } = useStatementBadges(refreshKey, sections.mis);
 	const groups = visible.reduce<Record<string, NavItem[]>>((acc, it) => {
