@@ -21,17 +21,39 @@ Rules (keep the UI labels in sync):
   ``mis.LINE_COST``, the same figure the MIS pages use). ERPNext copies the original
   invoice's incoming rate onto a credit note, which is not what the goods came back at.
   A credit note that moved no stock has no COGS ("—").
-- **Implausible lines are flagged, not counted** (the MIS rule): a line whose COGS is at
-  least ₹500 and more than 5x its revenue is almost always a stock-valuation error. It is
-  shown with a flag, and left out of every COGS, gross-profit and margin total.
+- **Repost drift is shown, not applied.** A repost (after a backdated entry) rewrites the
+  stock ledger but not ``sii.incoming_rate``. The invoice dialog therefore also reads each
+  sale line's booked stock value and marks a line whose booked value differs by more than
+  2% (and ₹10); COGS stays the incoming rate.
+- **Implausible lines are flagged, not counted.** Two rules, both almost always a
+  stock-valuation error: COGS of at least ₹500 and more than 5x the line's revenue (the MIS
+  rule, ``high_cogs``); or COGS under 10% of the item's reference cost — its BOM cost, or
+  for an item without a BOM (traded) its last purchase rate (``Item.last_purchase_rate``,
+  per stock UOM, company currency) — i.e. stock that came in at a zero or token rate, e.g.
+  a Material Receipt without a rate (``low_cogs``). A reference above 5x the line's sale is
+  ignored (it is itself implausible, e.g. a per-box purchase rate on a per-piece item), so a
+  free line is never low-flagged. A flagged line is shown, with its
+  reason, and left out of every COGS, gross-profit and margin total (list, KPIs and the
+  invoice alike).
+- **BOM cost is a reference, never COGS.** For an item with a default, active, submitted BOM,
+  the line also shows the BOM's planned cost (``base_total_cost / quantity`` per stock UOM:
+  raw material + operating - scrap, as of its last save or "Update Cost") and the variance
+  ``(COGS - BOM cost) / |BOM cost|`` — positive means the goods actually cost more than
+  planned. It is today's default BOM (an invoice doesn't record which BOM made its goods).
+  A gap beyond ±50% means one side is wrong — above: usually an outdated BOM; below:
+  usually stock valued too low — so such a line is marked for checking and left out of the
+  invoice's BOM total, as are flagged lines. Lines without COGS have no variance. Traded
+  items have no BOM ("—"). There is no "cost last updated" date to show: ERPNext's Update
+  Cost writes the cost without touching ``modified``, so the BOM's date is only its last save.
 - **Margins are ex-tax** and computed only over valued, unflagged lines; the response says
   how many lines were left out and why. KPI margins are ``None`` below ₹1,000 of revenue
   (dashboard-wide rule); invoice and line margins have no floor.
 - **"Latest"** is the newest by posting date, posting time, then creation, and ignores the
   list filters.
 - **Freshness:** the list / KPI payload is cached for up to 10 minutes under the
-  dashboard's submit/cancel counter (see ``report_cache``), so a new or cancelled invoice
-  always misses the cache. A stock repost (which can change a return's booked value) is
+  dashboard's submit/cancel counter (see ``report_cache``) and a fingerprint of the
+  reference costs (BOM costs, default BOMs, last purchase rates), so a new or cancelled
+  invoice, a BOM cost update or a new purchase rate always misses the cache. A stock repost (which can change a return's booked value) is
   picked up when the entry expires. The newest invoice and the dialog are never cached.
 - **Rate limit:** per user, per endpoint, per minute (Administrator exempt).
 """
@@ -77,6 +99,15 @@ CACHE_TTL = 10 * 60
 # debounced) and one detail call per dialog step, so a person never gets near these.
 FEED_LIMIT_PER_MIN = 60
 DETAIL_LIMIT_PER_MIN = 120
+# BOM vs actual: a gap beyond this means the BOM or the stock valuation is off (module doc).
+BOM_VARIANCE_CHECK_PCT = 50
+# COGS under this share of the reference cost (BOM, else last purchase rate): stock valued
+# at a zero / token rate (flagged).
+LOW_COGS_RATIO = 0.1
+# A sale line's booked stock value differing from its incoming-rate COGS by more than this
+# share (and this many rupees) is marked: usually a repost after a backdated entry.
+COGS_DRIFT_PCT = 2
+COGS_DRIFT_MIN = 10
 
 # Invoice-level joins: customer for the internal-customer rule and names.
 SI_FROM = """
@@ -108,37 +139,78 @@ CUSTOMER_NAME = "coalesce(nullif(c.customer_name, ''), nullif(si.customer_name, 
 NEWEST_FIRST = "si.posting_date desc, si.posting_time desc, si.creation desc"
 
 
-def _flag_sql(cogs: str, sale: str) -> str:
-	"""SQL: the line's COGS is implausible (see module doc)."""
+# Each item's default BOM, one row per item (the newest valid one): planned cost per stock
+# UOM. Used by both the per-line detail and the list / KPI aggregates, so they agree.
+BOM_UNITS = """(
+	select b.item, b.name as bom, b.modified, b.base_total_cost / b.quantity as unit_cost
+	from `tabBOM` b join `tabItem` i on i.name = b.item
+	where b.docstatus = 1 and b.is_active = 1 and b.is_default = 1
+	  and b.quantity > 0 and b.base_total_cost > 0
+	  and (coalesce(b.uom, '') = '' or b.uom = i.stock_uom)
+	  and not exists (
+		select 1 from `tabBOM` b2 join `tabItem` i2 on i2.name = b2.item
+		where b2.item = b.item and b2.docstatus = 1 and b2.is_active = 1 and b2.is_default = 1
+		  and b2.quantity > 0 and b2.base_total_cost > 0
+		  and (coalesce(b2.uom, '') = '' or b2.uom = i2.stock_uom)
+		  and (b2.modified > b.modified or (b2.modified = b.modified and b2.name > b.name))
+	  )
+)"""
+
+
+def _flag_sql(cogs: str, sale: str, ref: str) -> str:
+	"""SQL: the line's COGS is implausible (see module doc). ``ref`` (reference cost of the
+	line) may be NULL."""
 	return (
-		f"(abs({cogs}) >= {float(ANOMALY_MIN_COST)} "
-		f"and abs({cogs}) > {float(ANOMALY_COST_TO_REVENUE)} * abs({sale}))"
+		f"((abs({cogs}) >= {float(ANOMALY_MIN_COST)} "
+		f"and abs({cogs}) > {float(ANOMALY_COST_TO_REVENUE)} * abs({sale})) "
+		f"or ({ref} is not null and abs({ref}) <= {float(ANOMALY_COST_TO_REVENUE)} * abs({sale}) "
+		f"and abs({cogs}) < {float(LOW_COGS_RATIO)} * abs({ref})))"
 	)
 
 
-def _is_flagged(cogs: float | None, sale: float) -> bool:
-	return (
-		cogs is not None and abs(cogs) >= ANOMALY_MIN_COST and abs(cogs) > ANOMALY_COST_TO_REVENUE * abs(sale)
-	)
+def _flag_reason(cogs: float | None, sale: float, ref: float | None) -> str | None:
+	"""Python twin of _flag_sql: 'high_cogs', 'low_cogs' or None."""
+	if cogs is None:
+		return None
+	if abs(cogs) >= ANOMALY_MIN_COST and abs(cogs) > ANOMALY_COST_TO_REVENUE * abs(sale):
+		return "high_cogs"
+	# A reference over 5x the sale is itself implausible (e.g. a purchase rate per box
+	# stored against a per-piece item), so it can't vouch that the COGS is too low.
+	if (
+		ref is not None
+		and abs(ref) <= ANOMALY_COST_TO_REVENUE * abs(sale)
+		and abs(cogs) < LOW_COGS_RATIO * abs(ref)
+	):
+		return "low_cogs"
+	return None
+
+
+# Reference unit cost per stock UOM: the default BOM's, else the last purchase rate.
+REF_UNIT_COST = "coalesce(bu.unit_cost, nullif(it.last_purchase_rate, 0))"
 
 
 # Per-line COGS computed once (its return branch runs correlated subqueries), then
-# aggregated by the outer query. Lines: x.parent, x.sale (ex-tax), x.qty, x.cogs.
+# aggregated by the outer query. Lines: x.parent, x.sale (ex-tax), x.qty, x.cogs, x.ref.
 def _lines_subquery(where: str) -> str:
 	return f"""(
-		select sii.parent, sii.base_net_amount as sale, sii.qty, {LINE_COGS} as cogs
-		from {LINE_FROM} where {where}
+		select sii.parent, sii.base_net_amount as sale, sii.qty, {LINE_COGS} as cogs,
+		       {REF_UNIT_COST} * {STOCK_QTY} as ref
+		from {LINE_FROM}
+		left join {BOM_UNITS} bu on bu.item = sii.item_code
+		left join `tabItem` it on it.name = sii.item_code
+		where {where}
 	) x"""
 
 
 # Aggregates over _lines_subquery: valued (has COGS, not flagged), missing, flagged.
-_X_OK = f"(x.cogs is not null and not {_flag_sql('x.cogs', 'x.sale')})"
+_X_FLAG = _flag_sql("x.cogs", "x.sale", "x.ref")
+_X_OK = f"(x.cogs is not null and not {_X_FLAG})"
 LINE_AGGREGATES = f"""
 	coalesce(sum(case when {_X_OK} then x.cogs else 0 end), 0) as cogs,
 	coalesce(sum(case when {_X_OK} then x.sale else 0 end), 0) as valued_sale,
 	sum(case when {_X_OK} then 1 else 0 end) as valued,
 	sum(case when x.cogs is null then 1 else 0 end) as missing,
-	sum(case when x.cogs is not null and {_flag_sql("x.cogs", "x.sale")} then 1 else 0 end) as flagged,
+	sum(case when x.cogs is not null and {_X_FLAG} then 1 else 0 end) as flagged,
 	count(*) as line_count
 """
 
@@ -365,6 +437,29 @@ SI_FIELDS = f"""
 # ── detail ──────────────────────────────────────────────────────────────────
 
 
+def _bom_costs(item_codes: set[str]) -> dict[str, dict]:
+	"""Per item: its default BOM's planned cost per stock UOM (company currency). Items whose
+	BOM is in another unit than the item's stock UOM, or has no cost, are left out."""
+	item_codes = {c for c in item_codes if c}
+	if not item_codes:
+		return {}
+	rows = frappe.db.sql(
+		f"select bu.item, bu.bom, bu.modified, bu.unit_cost from {BOM_UNITS} bu where bu.item in %(items)s",
+		{"items": tuple(item_codes)},
+		as_dict=True,
+	)
+	return {
+		b.item: {"bom": b.bom, "unit_cost": flt(b.unit_cost), "saved_on": str(getdate(b.modified))}
+		for b in rows
+	}
+
+
+def _bom_variance(cogs: float | None, bom: float | None) -> float | None:
+	if cogs is None or not bom:
+		return None
+	return (cogs - bom) / abs(bom) * 100
+
+
 def _invoice_detail(name: str, tax_mode: str) -> dict:
 	si = frappe.db.sql(
 		f"""
@@ -388,18 +483,22 @@ def _invoice_detail(name: str, tax_mode: str) -> dict:
 		select sii.idx, sii.item_code, sii.item_name, sii.qty, sii.uom, sii.stock_qty,
 		       sii.conversion_factor, sii.base_net_rate, sii.base_net_amount,
 		       nullif(sii.incoming_rate, 0) as si_rate, nullif(dni.incoming_rate, 0) as dn_rate,
-		       {"(" + LINE_COST + ")" if is_return else "null"} as booked,
-		       {INCL_FACTOR} as incl_factor
+		       ({LINE_COST}) as booked,
+		       {INCL_FACTOR} as incl_factor, nullif(it.last_purchase_rate, 0) as last_purchase_rate
 		from {LINE_FROM}
+		left join `tabItem` it on it.name = sii.item_code
 		where sii.parent = %(name)s
 		order by sii.idx
 		""",
 		{"name": name},
 		as_dict=True,
 	)
+	boms = _bom_costs({ln.item_code for ln in lines})
 	out_lines = []
 	qty_total = sale_total = cogs_total = valued_sale = 0.0
 	missing = flagged = 0
+	bom_total = bom_actual = 0.0
+	bom_lines = bom_compared = bom_check = 0
 	for ln in lines:
 		factor = flt(ln.incl_factor) if tax_mode == "incl" else 1.0
 		conv = flt(ln.conversion_factor) or 1.0
@@ -416,7 +515,33 @@ def _invoice_detail(name: str, tax_mode: str) -> dict:
 			cogs_rate = incoming * conv if incoming else None
 			cogs_amount = incoming * stock_qty if incoming else None
 			source = "invoice" if ln.si_rate else ("delivery_note" if ln.dn_rate else None)
-		line_flagged = _is_flagged(cogs_amount, net_amount)
+		# BOM reference (per stock UOM → per invoice UOM, like the COGS rate; never tax-scaled).
+		bom = boms.get(ln.item_code)
+		stock_qty = flt(ln.stock_qty) or qty * conv
+		bom_rate = bom_amount = None
+		if bom:
+			bom_lines += 1
+			bom_rate = bom["unit_cost"] * conv
+			bom_amount = bom["unit_cost"] * stock_qty
+		# Reference cost for the low-COGS flag: the BOM's, else the last purchase rate.
+		if bom:
+			ref_source, ref_unit = "bom", bom["unit_cost"]
+		elif ln.last_purchase_rate:
+			ref_source, ref_unit = "purchase", flt(ln.last_purchase_rate)
+		else:
+			ref_source, ref_unit = None, None
+		ref_amount = ref_unit * stock_qty if ref_unit else None
+		# Repost drift (sales only — a return's COGS already is the booked value): the stock
+		# ledger now books a different cost than the invoice's incoming rate says.
+		booked = flt(ln.booked) if ln.booked is not None else None
+		drift = (
+			not is_return
+			and cogs_amount is not None
+			and booked is not None
+			and abs(booked - cogs_amount) > max(COGS_DRIFT_MIN, COGS_DRIFT_PCT / 100 * abs(booked))
+		)
+		flag_reason = _flag_reason(cogs_amount, net_amount, ref_amount)
+		line_flagged = flag_reason is not None
 		amount = net_amount * factor
 		qty_total += qty
 		sale_total += amount
@@ -427,6 +552,16 @@ def _invoice_detail(name: str, tax_mode: str) -> dict:
 		else:
 			cogs_total += cogs_amount
 			valued_sale += net_amount
+		# Variance is shown for every valued BOM line (a flagged one too: it explains the flag);
+		# only unflagged lines within ±BOM_VARIANCE_CHECK_PCT make the BOM total.
+		variance = _bom_variance(cogs_amount, bom_amount)
+		variance_check = variance is not None and not line_flagged and abs(variance) > BOM_VARIANCE_CHECK_PCT
+		if variance_check:
+			bom_check += 1
+		elif variance is not None and not line_flagged:
+			bom_compared += 1
+			bom_total += bom_amount
+			bom_actual += cogs_amount
 		out_lines.append(
 			{
 				"idx": cint(ln.idx),
@@ -440,10 +575,26 @@ def _invoice_detail(name: str, tax_mode: str) -> dict:
 				"amount": amount,
 				"cogs_amount": cogs_amount,
 				"flagged": line_flagged,
+				"flag_reason": flag_reason,
 				# Rate-based, ex-tax: (sale rate - COGS rate) / sale rate.
 				"margin_pct": ((net_rate - cogs_rate) / net_rate * 100)
 				if cogs_rate is not None and net_rate
 				else None,
+				"bom": bom["bom"] if bom else None,
+				"bom_rate": bom_rate,
+				"bom_amount": bom_amount,
+				# Last save only: ERPNext's Update Cost doesn't touch the BOM's modified date.
+				"bom_saved_on": bom["saved_on"] if bom else None,
+				# What the low-COGS flag compared against (per invoice UOM, ex-tax).
+				"ref_source": ref_source,
+				"ref_rate": ref_unit * conv if ref_unit else None,
+				# Stock-ledger value now booked for the line (repost-aware); drift = it differs
+				# from the incoming-rate COGS by more than COGS_DRIFT_PCT / COGS_DRIFT_MIN.
+				"booked_cogs_amount": booked,
+				"cogs_drift": drift,
+				# (COGS - BOM) / |BOM|; positive = cost more than planned.
+				"bom_variance_pct": variance,
+				"bom_variance_check": variance_check,
 			}
 		)
 	valued = len(out_lines) > missing + flagged
@@ -464,11 +615,22 @@ def _invoice_detail(name: str, tax_mode: str) -> dict:
 			"margin_pct": margin,
 			"lines_without_cogs": missing,
 			"lines_flagged": flagged,
+			"lines_drifted": sum(1 for line in out_lines if line["cogs_drift"]),
 			"net_total": flt(si.base_net_total),
 			"taxes": flt(si.base_total_taxes_and_charges),
 			"discount": flt(si.base_discount_amount),
 			"rounding": flt(si.base_rounding_adjustment),
 			"grand_total": flt(si.base_rounded_total) or flt(si.base_grand_total),
+			# Over lines with a BOM, a COGS and a gap within ±BOM_VARIANCE_CHECK_PCT.
+			"bom": {
+				"lines": bom_lines,
+				"compared": bom_compared,
+				"check": bom_check,
+				"planned": bom_total if bom_compared else None,
+				"actual": bom_actual if bom_compared else None,
+				"variance": (bom_actual - bom_total) if bom_compared else None,
+				"variance_pct": _bom_variance(bom_actual, bom_total) if bom_compared else None,
+			},
 		},
 		"cogs_total": cogs,
 		"lines_without_cogs": missing,
@@ -561,7 +723,7 @@ def _cached_listing(filters: dict) -> dict:
 	"""KPIs + one page + filter options, cached under the submit/cancel counter."""
 	digest = hashlib.sha1(json.dumps(filters, sort_keys=True, default=str).encode()).hexdigest()
 	cache = frappe.cache()
-	key = f"company_dashboard|invoice_feed|{_ledger_counter(cache)}|{digest}"
+	key = f"company_dashboard|invoice_feed|{_ledger_counter(cache)}|{_reference_fingerprint()}|{digest}"
 	# expires=True: don't memoise a miss in the request-local cache (set_value with an expiry
 	# doesn't overwrite it, so a later read in the same process would miss again).
 	hit = cache.get_value(key, expires=True)
@@ -570,6 +732,23 @@ def _cached_listing(filters: dict) -> dict:
 	data = _compute_listing(filters)
 	cache.set_value(key, data, expires_in_sec=CACHE_TTL)
 	return copy.deepcopy(data)
+
+
+def _reference_fingerprint() -> str:
+	"""Changes whenever a reference cost the flags use changes: a BOM's cost (ERPNext's
+	Update Cost fires no hook and keeps ``modified``), the default BOM, or an item's last
+	purchase rate (set by Purchase Orders too, which don't bump the ledger counter). Two
+	small aggregate queries, a few ms."""
+	bom = frappe.db.sql(
+		"""select count(*), coalesce(sum(base_total_cost / quantity), 0),
+		          coalesce(sum(crc32(name)), 0), max(modified)
+		from `tabBOM` where docstatus = 1 and is_active = 1 and is_default = 1 and quantity > 0"""
+	)[0]
+	item = frappe.db.sql(
+		"select count(*), coalesce(sum(last_purchase_rate), 0) from `tabItem` where last_purchase_rate > 0"
+	)[0]
+	raw = json.dumps([*bom, *item], default=str)
+	return hashlib.sha1(raw.encode()).hexdigest()[:12]
 
 
 def _ledger_counter(cache) -> str:

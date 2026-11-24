@@ -12,7 +12,7 @@ import { useInvoiceDetail, useInvoiceFeed, useLiveInvoices } from "@/hooks/useIn
 import { useUrlNumber, useUrlParam, useUrlPatch } from "@/lib/urlState";
 import { MINUS, cn, errorMessage, formatINR, formatMargin, formatNumber, marginState, marginTitle, shortDate } from "@/lib/utils";
 import type { MisPageProps } from "@/App";
-import type { InvoiceDetail, InvoiceFeedResponse, InvoiceRange, InvoiceRow } from "@/types/invoices";
+import type { InvoiceDetail, InvoiceFeedResponse, InvoiceLine, InvoiceRange, InvoiceRow } from "@/types/invoices";
 import { INVOICE_RANGES } from "@/types/invoices";
 import type { TaxMode } from "@/types/mis";
 
@@ -82,7 +82,30 @@ function MarginChip({ pct, prefix, className }: { pct: number | null | undefined
 }
 
 const FLAG_TITLE =
-	"COGS is more than 5× this line's revenue — almost always a stock-valuation error. Shown, but left out of COGS, gross profit and margin until it is fixed.";
+	"COGS looks mis-valued — more than 5× the line's revenue, or under 10% of the item's BOM cost (stock that came in at a zero or token rate). Almost always a stock-valuation error. Shown, but left out of COGS, gross profit and margin until it is fixed.";
+
+const FLAG_REASON_TITLE: Record<"high_cogs" | "low_cogs", string> = {
+	high_cogs:
+		"COGS is more than 5× this line's revenue — almost always a stock-valuation error. Left out of COGS, gross profit and margin until it is fixed.",
+	low_cogs:
+		"COGS is under 10% of the item's reference cost (its BOM cost, or for a traded item its last purchase rate) — the stock most likely came in at a zero or token rate (e.g. a Material Receipt / transfer without a rate). Fix the stock valuation; until then the line is left out of COGS, gross profit and margin.",
+};
+
+/** Repost drift: the stock ledger now books a different cost than the invoice's incoming rate. */
+function driftTitle(ln: InvoiceLine): string {
+	const booked = ln.booked_cogs_amount ?? 0;
+	const perUnit = ln.qty ? booked / ln.qty : null;
+	return `The stock ledger now books ${rupees(booked, 2)} for this line (${rupees(perUnit, 2)} per ${ln.uom}) — usually after a repost of a backdated entry, which doesn't update the invoice's incoming rate. COGS here stays the incoming rate ${rupees(ln.cogs_amount, 2)}; the P&L uses the booked value.`;
+}
+
+/** Flag tooltip for one line, naming the reference it was compared with. */
+function lineFlagTitle(ln: InvoiceLine): string {
+	if (ln.flag_reason === "low_cogs" && ln.ref_rate != null) {
+		const ref = ln.ref_source === "bom" ? "BOM cost" : "last purchase rate";
+		return `COGS ${rupees(ln.cogs_rate, 2)} is under 10% of the ${ref} ${rupees(ln.ref_rate, 2)} — the stock most likely came in at a zero or token rate (e.g. a Material Receipt / transfer without a rate). Fix the stock valuation; until then the line is left out of COGS, gross profit and margin.`;
+	}
+	return ln.flag_reason ? FLAG_REASON_TITLE[ln.flag_reason] : FLAG_TITLE;
+}
 
 const COGS_SOURCE_TITLE: Record<string, string> = {
 	invoice: "Incoming rate on the invoice",
@@ -90,9 +113,62 @@ const COGS_SOURCE_TITLE: Record<string, string> = {
 	stock_ledger: "Booked value of the stock that came back (stock ledger)",
 };
 
-function FlagChip() {
+/** "+12.4%" / "−3.0%". */
+function signedPct(v: number): string {
+	return `${v > 0 ? "+" : v < 0 ? MINUS : ""}${Math.abs(v).toFixed(1)}%`;
+}
+
+/** Actual COGS vs BOM: within ±5% on plan, above = cost overrun (red), below = under plan. */
+function varianceTone(v: number): string {
+	if (Math.abs(v) <= 5) return "text-text-3";
+	return v > 0 ? "text-red" : "text-green";
+}
+
+/** Gap beyond ±50%: which side is likely wrong depends on the direction. */
+const BOM_CHECK_HIGH_TITLE =
+	"Actual cost is more than 50% above the BOM cost — the BOM is most likely out of date (run Update Cost) or its quantities/units are wrong; or the stock is over-valued. Left out of the BOM total.";
+const BOM_CHECK_LOW_TITLE =
+	"Actual cost is more than 50% below the BOM cost — the stock was most likely valued too low (received or transferred at a zero / low rate); or the BOM is inflated. Left out of the BOM total.";
+
+/** BOM rate cell: planned rate, then the variance of the actual COGS against it. */
+function BomCell({ ln }: { ln: InvoiceLine }) {
+	if (ln.bom_rate == null) {
+		return (
+			<span className="text-text-4 cursor-help" title="No BOM for this item (traded item, no default/active BOM, or BOM in another unit)">
+				— <span aria-hidden="true">ⓘ</span>
+			</span>
+		);
+	}
+	const title = `${ln.bom} — planned cost as of its last save or "Update Cost"${
+		ln.bom_saved_on ? ` (last saved ${shortDate(ln.bom_saved_on)})` : ""
+	}. Reference only; COGS stays the incoming rate.`;
+	const v = ln.bom_variance_pct;
 	return (
-		<span className="inline-block rounded-[6px] px-2 py-[2px] text-[11.5px] font-semibold bg-amber-bg text-amber cursor-help" title={FLAG_TITLE}>
+		<div className="inline-flex flex-col items-end leading-tight">
+			<span className="text-text-2 cursor-help" title={title}>
+				{rupees(ln.bom_rate, 2)}
+			</span>
+			{v != null &&
+				(ln.flagged ? (
+					<span className="text-[11px] font-semibold text-amber cursor-help" title={lineFlagTitle(ln)}>
+						⚠ {signedPct(v)} vs BOM
+					</span>
+				) : ln.bom_variance_check ? (
+					<span className="text-[11px] font-semibold text-amber cursor-help" title={v > 0 ? BOM_CHECK_HIGH_TITLE : BOM_CHECK_LOW_TITLE}>
+						⚠ {signedPct(v)} {v > 0 ? "check BOM" : "check valuation"}
+					</span>
+				) : (
+					<span className={cn("text-[11px] font-semibold", varianceTone(v))} title="Actual COGS vs BOM cost (positive = cost more than planned)">
+						{signedPct(v)} vs BOM
+					</span>
+				))}
+		</div>
+	);
+}
+
+function FlagChip({ title = FLAG_TITLE }: { title?: string }) {
+	return (
+		<span className="inline-block rounded-[6px] px-2 py-[2px] text-[11.5px] font-semibold bg-amber-bg text-amber cursor-help" title={title}>
 			⚠ Check
 		</span>
 	);
@@ -309,6 +385,11 @@ function LiveBadge({ live }: { live: boolean }) {
 function InvoiceBody({ inv, taxMode, latest = false }: { inv: InvoiceDetail; taxMode: TaxMode; latest?: boolean }) {
 	const t = inv.totals;
 	const isReturn = Boolean(inv.is_return);
+	const count = (pred: (l: InvoiceLine) => boolean) => inv.lines.filter(pred).length;
+	const flaggedHigh = count((l) => l.flag_reason === "high_cogs");
+	const flaggedLow = count((l) => l.flag_reason === "low_cogs");
+	const checkHigh = count((l) => l.bom_variance_check && (l.bom_variance_pct ?? 0) > 0);
+	const checkLow = count((l) => l.bom_variance_check && (l.bom_variance_pct ?? 0) < 0);
 	return (
 		<>
 			<div className="px-5 pt-4 pb-3">
@@ -369,9 +450,41 @@ function InvoiceBody({ inv, taxMode, latest = false }: { inv: InvoiceDetail; tax
 							{formatNumber(t.lines_without_cogs)} {t.lines_without_cogs === 1 ? "line has" : "lines have"} no COGS — left out of COGS and margin.
 						</div>
 					)}
-					{t.lines_flagged > 0 && (
-						<div className="text-amber" title={FLAG_TITLE}>
-							⚠ {formatNumber(t.lines_flagged)} {t.lines_flagged === 1 ? "line looks" : "lines look"} mis-valued (COGS &gt; 5× revenue) — left out of COGS and margin.
+					{flaggedHigh > 0 && (
+						<div className="text-amber" title={FLAG_REASON_TITLE.high_cogs}>
+							⚠ {formatNumber(flaggedHigh)} {flaggedHigh === 1 ? "line looks" : "lines look"} mis-valued (COGS &gt; 5× revenue) — left out of COGS and margin.
+						</div>
+					)}
+					{flaggedLow > 0 && (
+						<div className="text-amber" title={FLAG_REASON_TITLE.low_cogs}>
+							⚠ {formatNumber(flaggedLow)} {flaggedLow === 1 ? "line's" : "lines'"} COGS is under 10% of the BOM cost / last purchase rate — stock likely valued at a zero/low rate; left out of COGS and margin.
+						</div>
+					)}
+					{t.bom.planned != null && t.bom.variance_pct != null && (
+						<div title="Planned (BOM) cost vs actual COGS over the lines that have a BOM. Reference only — COGS stays the incoming rate.">
+							BOM cost <span className="font-semibold text-text tabular-nums">{rupees(t.bom.planned)}</span>
+							{" vs actual "}
+							<span className="font-semibold text-text tabular-nums">{rupees(t.bom.actual)}</span>{" "}
+							<span className={cn("font-semibold tabular-nums", varianceTone(t.bom.variance_pct))}>({signedPct(t.bom.variance_pct)})</span>
+							<span className="text-text-3">
+								{" "}
+								· {formatNumber(t.bom.compared)} of {formatNumber(t.bom.lines)} BOM {t.bom.lines === 1 ? "line" : "lines"}
+							</span>
+						</div>
+					)}
+					{t.lines_drifted > 0 && (
+						<div className="text-text-3" title="A repost (after a backdated stock entry) rewrites the stock ledger but not the invoice's incoming rate. Hover ≠GL on a line for the booked value.">
+							{formatNumber(t.lines_drifted)} {t.lines_drifted === 1 ? "line's" : "lines'"} booked stock value now differs from the incoming rate (≠GL) — usually a repost; COGS here stays the incoming rate.
+						</div>
+					)}
+					{checkHigh > 0 && (
+						<div className="text-amber" title={BOM_CHECK_HIGH_TITLE}>
+							⚠ {formatNumber(checkHigh)} {checkHigh === 1 ? "line costs" : "lines cost"} over 50% more than the BOM — likely an outdated BOM; left out of the BOM total.
+						</div>
+					)}
+					{checkLow > 0 && (
+						<div className="text-amber" title={BOM_CHECK_LOW_TITLE}>
+							⚠ {formatNumber(checkLow)} {checkLow === 1 ? "line costs" : "lines cost"} over 50% less than the BOM — check the stock valuation; left out of the BOM total.
 						</div>
 					)}
 				</div>
@@ -417,6 +530,7 @@ function ItemsTable({ inv, taxMode }: { inv: InvoiceDetail; taxMode: TaxMode }) 
 						<DrillTh>Qty</DrillTh>
 						<DrillTh>Sale rate</DrillTh>
 						<DrillTh>COGS rate</DrillTh>
+						<DrillTh>BOM rate</DrillTh>
 						<DrillTh>Amount</DrillTh>
 						<DrillTh>Margin</DrillTh>
 					</tr>
@@ -446,8 +560,16 @@ function ItemsTable({ inv, taxMode }: { inv: InvoiceDetail; taxMode: TaxMode }) 
 										{rupees(ln.cogs_rate, 2)}
 										{ln.cogs_source === "delivery_note" && <sup className="ml-0.5 text-[9px] text-text-3">DN</sup>}
 										{ln.cogs_source === "stock_ledger" && <sup className="ml-0.5 text-[9px] text-text-3">SLE</sup>}
+										{ln.cogs_drift && ln.booked_cogs_amount != null && (
+											<sup className="ml-0.5 text-[9px] font-semibold text-amber cursor-help" title={driftTitle(ln)}>
+												≠GL
+											</sup>
+										)}
 									</span>
 								)}
+							</td>
+							<td data-label="BOM rate" className="md:px-3 py-2.5 text-right whitespace-nowrap">
+								<BomCell ln={ln} />
 							</td>
 							<td data-label="Amount" className={cn("md:px-3 py-2.5 text-right font-semibold whitespace-nowrap", ln.amount < 0 && "text-red")}>
 								{rupees(ln.amount, 2)}
@@ -456,7 +578,7 @@ function ItemsTable({ inv, taxMode }: { inv: InvoiceDetail; taxMode: TaxMode }) 
 								{ln.cogs_rate == null ? (
 									<span className="text-text-4">—</span>
 								) : ln.flagged ? (
-									<FlagChip />
+									<FlagChip title={lineFlagTitle(ln)} />
 								) : (
 									<MarginChip pct={ln.margin_pct} />
 								)}
@@ -481,6 +603,7 @@ function ItemsTable({ inv, taxMode }: { inv: InvoiceDetail; taxMode: TaxMode }) 
 								</span>
 							)}
 						</td>
+						<td className="hidden md:table-cell" />
 						<td className="hidden md:table-cell" />
 						<td className="hidden md:table-cell" />
 						<td data-label="Amount" className={cn("md:px-3 py-2.5 text-right whitespace-nowrap", t.amount < 0 && "text-red")}>{rupees(t.amount, 2)}</td>
